@@ -2,6 +2,7 @@
 Question generation system using LLM.
 """
 import json
+import re
 from typing import List, Dict, Any, Optional
 from app.models import (
     QuestionGenerationRequest,
@@ -116,24 +117,55 @@ class QuestionGenerator:
             
             if start_idx != -1 and end_idx != -1:
                 json_str = response_text[start_idx:end_idx+1]
-                parsed = json.loads(json_str)
                 
-                for item in parsed:
+                # Try multiple parsing strategies
+                parsed = None
+                parse_errors = []
+                
+                # Strategy 1: Direct parsing
+                try:
+                    parsed = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    parse_errors.append(f"Direct parse: {e}")
+                    
+                    # Strategy 2: Try with strict=False to allow control characters
                     try:
-                        question = GeneratedQuestion(
-                            question=item.get('question', ''),
-                            question_type=question_type,
-                            difficulty=difficulty,
-                            options=item.get('options'),
-                            correct_answer=item.get('correct_answer', item.get('answer', '')),
-                            explanation=item.get('explanation', ''),
-                            subject=subject,
-                            topic=topic or item.get('topic'),
-                        )
-                        questions.append(question)
-                    except Exception as e:
-                        app_logger.warning(f"Failed to parse question item: {e}")
-                        continue
+                        parsed = json.loads(json_str, strict=False)
+                    except json.JSONDecodeError as e2:
+                        parse_errors.append(f"Lenient parse: {e2}")
+                        
+                        # Strategy 3: Escape backslashes (common with LaTeX)
+                        try:
+                            # This regex replaces \ with \\ only if not already followed by another \
+                            json_str_escaped = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_str)
+                            parsed = json.loads(json_str_escaped)
+                        except (json.JSONDecodeError, re.error) as e3:
+                            parse_errors.append(f"Escaped parse: {e3}")
+                
+                if parsed and isinstance(parsed, list):
+                    for item in parsed:
+                        try:
+                            if isinstance(item, dict):
+                                question = GeneratedQuestion(
+                                    question=item.get('question', ''),
+                                    question_type=question_type,
+                                    difficulty=difficulty,
+                                    options=item.get('options'),
+                                    correct_answer=item.get('correct_answer', item.get('answer', '')),
+                                    explanation=item.get('explanation', ''),
+                                    subject=subject,
+                                    topic=topic or item.get('topic'),
+                                )
+                                questions.append(question)
+                        except Exception as e:
+                            app_logger.warning(f"Failed to parse question item: {e}")
+                            continue
+                else:
+                    app_logger.warning(f"All JSON parsing strategies failed: {parse_errors}")
+                    # Fallback to text parsing
+                    questions = self._parse_text_response(
+                        response_text, subject, difficulty, question_type, topic
+                    )
             
             else:
                 # Fallback: try to parse as structured text
@@ -144,14 +176,16 @@ class QuestionGenerator:
         
         except Exception as e:
             app_logger.error(f"Error parsing LLM response: {e}")
-            # Return a single question with the error
+            # Log the raw response for debugging
+            app_logger.debug(f"Raw LLM response (first 500 chars): {response_text[:500]}")
+            # Return a question indicating parsing failure with helpful message
             questions = [
                 GeneratedQuestion(
-                    question=f"Error generating questions: {str(e)}",
+                    question="Failed to parse LLM response. The model may have included improperly formatted content.",
                     question_type=question_type,
                     difficulty=difficulty,
-                    correct_answer="N/A",
-                    explanation=response_text[:500],
+                    correct_answer="Please try again or adjust your parameters.",
+                    explanation=f"Technical details: {str(e)}\n\nRaw response preview: {response_text[:200]}...",
                     subject=subject,
                     topic=topic,
                 )
