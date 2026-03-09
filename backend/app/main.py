@@ -199,7 +199,7 @@ async def query_knowledge_base(request: QueryRequest):
         current_retriever = get_retriever()
         
         # Generate query embedding
-        query_embedding = current_embedder.embed(request.query)
+        query_embedding = current_embedder.embed_text(request.query)
         
         # Hybrid retrieval with automatic routing
         results = current_retriever.search(
