@@ -5,6 +5,7 @@ Two tabs: Knowledge Addition and Query/Question Generation.
 import streamlit as st
 import requests
 import time
+import re
 from pathlib import Path
 import pandas as pd
 from typing import Optional
@@ -12,6 +13,61 @@ from typing import Optional
 
 # Configuration
 API_BASE_URL = "http://localhost:8601"
+
+
+def render_latex_text(text: str) -> str:
+    r"""
+    Convert LaTeX expressions in text to Streamlit-compatible format.
+    Handles both inline $...$ and display $$...$$ math.
+    Also handles bare LaTeX like \vec{A}, \hat{i}, etc.
+    """
+    if not text:
+        return text
+    
+    # Protect already properly formatted LaTeX
+    # Handle display math $$...$$
+    text = re.sub(r'\$\$(.*?)\$\$', r'$$\1$$', text, flags=re.DOTALL)
+    
+    # Handle inline math $...$
+    text = re.sub(r'\$([^\$]+?)\$', r'$\1$', text)
+    
+    # Handle bare LaTeX expressions (not already in $ or $$)
+    # Common patterns: \vec{}, \hat{}, \frac{}{}, \alpha, etc.
+    # This is a simplified approach - wrap bare LaTeX in $...$
+    def wrap_bare_latex(match):
+        latex = match.group(0)
+        # Check if already in math mode
+        return f"${latex}$"
+    
+    # Match LaTeX commands not already in $...$ or $$...$$
+    # This regex looks for backslash commands
+    # Only wrap if not already between $ symbols
+    parts = []
+    last_end = 0
+    in_math = False
+    
+    for match in re.finditer(r'\$+', text):
+        # Track if we're entering or leaving math mode
+        dollar_count = len(match.group(0))
+        in_math = not in_math
+    
+    # More robust: wrap sequences with backslash commands if not in $
+    if r'\vec{' in text or r'\hat{' in text or r'\frac{' in text:
+        # Split by $ to find non-math parts
+        segments = re.split(r'(\$+[^\$]*\$+)', text)
+        result = []
+        for segment in segments:
+            if segment.startswith('$'):
+                # Already math mode
+                result.append(segment)
+            elif '\\' in segment and any(cmd in segment for cmd in [r'\vec', r'\hat', r'\frac', r'\alpha', r'\beta', r'\gamma']):
+                # Has LaTeX commands but not in math mode - wrap it
+                result.append(f"${segment}$")
+            else:
+                result.append(segment)
+        return ''.join(result)
+    
+    return text
 
 
 def convert_windows_to_wsl_path(path: str) -> str:
@@ -340,7 +396,8 @@ with tab2:
                 
                 if result:
                     st.markdown("### Answer")
-                    st.markdown(f"<div class='success-box'>{result['answer']}</div>", unsafe_allow_html=True)
+                    answer_text = render_latex_text(result['answer'])
+                    st.markdown(f"<div class='success-box'>{answer_text}</div>", unsafe_allow_html=True)
                     
                     st.markdown(f"*Processing time: {result['processing_time']:.2f}s*")
                     
@@ -421,15 +478,23 @@ with tab2:
                     st.markdown("---")
                     for i, q in enumerate(result['questions'], 1):
                         st.markdown(f"### Question {i}")
-                        st.markdown(f"**{q['question']}**")
+                        
+                        # Render question with LaTeX support
+                        question_text = render_latex_text(q['question'])
+                        st.markdown(question_text)
                         
                         if q.get('options'):
                             for opt in q['options']:
-                                st.markdown(f"- {opt}")
+                                option_text = render_latex_text(opt)
+                                st.markdown(f"- {option_text}")
                         
                         with st.expander("Show Answer & Explanation"):
-                            st.markdown(f"**Answer:** {q['correct_answer']}")
-                            st.markdown(f"**Explanation:** {q['explanation']}")
+                            answer_text = render_latex_text(q['correct_answer'])
+                            st.markdown(f"**Answer:** {answer_text}")
+                            
+                            explanation_text = render_latex_text(q['explanation'])
+                            st.markdown(f"**Explanation:** {explanation_text}")
+                            
                             st.caption(f"Difficulty: {q['difficulty']} | Type: {q['question_type']}")
                         
                         st.markdown("---")

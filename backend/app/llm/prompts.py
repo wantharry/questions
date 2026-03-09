@@ -215,11 +215,25 @@ If the context is insufficient, state this clearly and provide the best answer y
             context=context,
             num_questions=num_questions,
         )
-        
+
         # Add question type specification
         if question_type != QuestionType.MULTIPLE_CHOICE:
             user_prompt += f"\n\nNote: Generate {question_type.value.replace('_', ' ')} questions."
-        
+
+        # Enforce exact JSON field names so the parser can reliably extract explanation
+        user_prompt += """
+
+Use EXACTLY this JSON structure (no other field names):
+[
+  {
+    "question": "question text here",
+    "options": ["A) option1", "B) option2", "C) option3", "D) option4"],
+    "correct_answer": "full correct answer here",
+    "explanation": "detailed explanation here"
+  }
+]
+For non-multiple-choice questions, set "options" to null. Return ONLY the JSON array, no other text."""
+
         return system_prompt, user_prompt
     
     @classmethod
