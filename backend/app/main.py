@@ -114,7 +114,8 @@ def get_question_generator():
     global question_generator
     if question_generator is None:
         app_logger.info("Initializing question generator...")
-        question_generator = QuestionGenerator()
+        # Pass the retriever so question generator can retrieve context
+        question_generator = QuestionGenerator(retriever=get_retriever())
         app_logger.info("Question generator ready")
     return question_generator
 
@@ -276,11 +277,10 @@ async def generate_questions(request: QuestionGenerationRequest):
         if request.context:
             context_used = request.context[:500] + "..." if len(request.context) > 500 else request.context
         else:
-            query = f"{request.subject.value}"
+            # Use topic/subject info instead
+            context_used = f"Generating {request.question_type.value} questions for {request.subject.value}"
             if request.topic:
-                query += f" {request.topic}"
-            context_used = get_retriever().get_context_for_query(query, top_k=5)
-            context_used = context_used[:500] + "..." if len(context_used) > 500 else context_used
+                context_used += f" - Topic: {request.topic}"
         
         processing_time = time.time() - start_time
         

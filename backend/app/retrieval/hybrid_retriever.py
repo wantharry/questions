@@ -8,6 +8,7 @@ from app.vectorstore.bm25_index import BM25Index
 from app.retrieval.reranker import Reranker
 from app.retrieval.query_router import QueryRouter
 from app.models_advanced import QueryIntent, IndexType, HybridSearchRequest
+from app.ingestion.embedder import SentenceTransformerEmbedder
 from app.config import settings
 from app.utils.logger import app_logger
 
@@ -27,12 +28,14 @@ class HybridRetriever:
         bm25_index: BM25Index = None,
         reranker: Reranker = None,
         query_router: QueryRouter = None,
+        embedder: SentenceTransformerEmbedder = None,
     ):
         """Initialize hybrid retriever."""
         self.multi_index = multi_index_manager or MultiIndexManager()
         self.bm25 = bm25_index or BM25Index()
         self.reranker = reranker or Reranker()
         self.query_router = query_router or QueryRouter()
+        self.embedder = embedder or SentenceTransformerEmbedder()
         
         app_logger.info("Initialized HybridRetriever")
     
@@ -253,3 +256,70 @@ class HybridRetriever:
             'bm25_stats': self.bm25.get_stats(),
             'reranker_model': self.reranker.model_name if self.reranker.model else None,
         }
+    
+    def get_context_for_query(
+        self,
+        query: str,
+        top_k: int = 5,
+        max_tokens: int = 4000,
+    ) -> str:
+        """
+        Retrieve and format context for a query using hybrid search.
+        
+        Args:
+            query: Natural language query
+            top_k: Number of chunks to retrieve
+            max_tokens: Approximate max tokens to include
+        
+        Returns:
+            Formatted context string
+        """
+        try:
+            # Generate query embedding
+            query_embedding = self.embedder.embed_text(query)
+            
+            # Perform hybrid search
+            results = self.search(
+                query=query,
+                query_embedding=query_embedding,
+                top_k=top_k,
+                use_reranking=True
+            )
+            
+            if not results:
+                return "No relevant context found in the knowledge base."
+            
+            context_parts = []
+            total_length = 0
+            
+            for result in results:
+                text = result.get('text', '')
+                metadata = result.get('metadata', {})
+                score = result.get('hybrid_score', result.get('score', 0))
+                
+                # Format chunk with source information
+                chunk_text = f"[Source: {metadata.get('file_name', metadata.get('file_path', 'unknown'))}"
+                if 'page_number' in metadata:
+                    chunk_text += f", Page {metadata['page_number']}"
+                chunk_text += f" | Relevance: {score:.2f}]\n{text}\n"
+                
+                # Rough token estimation (1 token ≈ 4 characters)
+                estimated_tokens = len(chunk_text) // 4
+                
+                if total_length + estimated_tokens > max_tokens:
+                    break
+                
+                context_parts.append(chunk_text)
+                total_length += estimated_tokens
+            
+            if not context_parts:
+                return "No relevant context found within token limit."
+            
+            context = "\n---\n".join(context_parts)
+            app_logger.info(f"Generated context from {len(context_parts)} chunks (~{total_length} tokens)")
+            
+            return context
+        
+        except Exception as e:
+            app_logger.error(f"Error getting context for query: {e}")
+            return f"Error retrieving context: {str(e)}"

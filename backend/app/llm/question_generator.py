@@ -2,7 +2,7 @@
 Question generation system using LLM.
 """
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from app.models import (
     QuestionGenerationRequest,
     GeneratedQuestion,
@@ -12,16 +12,15 @@ from app.models import (
 )
 from app.llm.llm_manager import LLMManager
 from app.llm.prompts import PromptTemplates
-from app.retrieval.retriever import Retriever
 from app.utils.logger import app_logger
 
 
 class QuestionGenerator:
     """Generate questions from context using LLM."""
     
-    def __init__(self):
+    def __init__(self, retriever=None):
         self.llm = LLMManager.get_llm()
-        self.retriever = Retriever()
+        self.retriever = retriever  # Optional, can be set later
         app_logger.info("Initialized QuestionGenerator")
     
     async def generate_questions(
@@ -42,11 +41,17 @@ class QuestionGenerator:
             if request.context:
                 context = request.context
             else:
-                # Retrieve context based on topic
-                query = f"{request.subject.value}"
-                if request.topic:
-                    query += f" {request.topic}"
-                context = self.retriever.get_context_for_query(query, top_k=10)
+                # Try to retrieve context if retriever is available
+                if self.retriever:
+                    query = f"{request.subject.value}"
+                    if request.topic:
+                        query += f" {request.topic}"
+                    context = self.retriever.get_context_for_query(query, top_k=8)
+                else:
+                    # Use provided context or generate generic questions
+                    context = f"Generate {request.question_type.value} questions about {request.subject.value}"
+                    if request.topic:
+                        context += f" related to {request.topic}"
             
             # Get prompts
             system_prompt, user_prompt = PromptTemplates.get_question_prompt(
