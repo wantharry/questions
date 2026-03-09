@@ -20,19 +20,22 @@ function Test-PortInUse {
 
 # Function to wait for service
 function Wait-ForService {
-    param([string]$Url, [int]$MaxAttempts = 20)
-    
+    param([string]$Url, [int]$MaxAttempts = 60)
+
     Write-Host "Waiting for service at $Url..." -ForegroundColor Yellow
+    Write-Host "(Backend loads embedding model on startup - allow up to 2 minutes)" -ForegroundColor Gray
     for ($i = 1; $i -le $MaxAttempts; $i++) {
         try {
-            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
             if ($response.StatusCode -eq 200) {
                 Write-Host "Service is ready!" -ForegroundColor Green
                 return $true
             }
         }
         catch {
-            Write-Host "  Attempt $i/$MaxAttempts..." -ForegroundColor Gray
+            if ($i % 10 -eq 0) {
+                Write-Host "  Still waiting... ($i/$MaxAttempts - $([math]::Round($i*2/60,1)) min)" -ForegroundColor Gray
+            }
             Start-Sleep -Seconds 2
         }
     }
@@ -68,16 +71,16 @@ catch {
 Write-Host ""
 Write-Host "[3/4] Starting Backend API on port $BACKEND_PORT..." -ForegroundColor Yellow
 
-$backendCmd = "cd $PROJECT_PATH; source venv/bin/activate; cd backend; uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT"
+$backendCmd = "cd $PROJECT_PATH && source venv/bin/activate && cd backend && uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT > /tmp/rag_backend.log 2>&1"
 
 Start-Process wsl -ArgumentList "bash", "-c", $backendCmd -WindowStyle Hidden
 
 # Wait for backend
-if (Wait-ForService "http://localhost:$BACKEND_PORT/health" -MaxAttempts 15) {
+if (Wait-ForService "http://localhost:$BACKEND_PORT/health") {
     Write-Host "Backend started successfully!" -ForegroundColor Green
 } else {
-    Write-Host "Backend failed to start" -ForegroundColor Red
-    Write-Host "Try running manually or check logs" -ForegroundColor Yellow
+    Write-Host "Backend failed to start. Last 20 lines of log:" -ForegroundColor Red
+    wsl bash -c "tail -20 /tmp/rag_backend.log 2>/dev/null || echo 'No log file found'"
     exit 1
 }
 

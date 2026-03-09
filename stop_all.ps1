@@ -47,13 +47,13 @@ Stop-ProcessOnPort -Port $BACKEND_PORT -ServiceName "Backend"
 # Stop frontend
 Stop-ProcessOnPort -Port $FRONTEND_PORT -ServiceName "Frontend"
 
-# Also stop any lingering WSL processes running uvicorn or streamlit
+# Kill WSL-side processes directly using fuser (most reliable)
 Write-Host ""
 Write-Host "Cleaning up WSL processes..." -ForegroundColor Yellow
 
 try {
-    # Kill uvicorn and streamlit processes in WSL
-    wsl bash -c "pkill -f 'uvicorn.*8601' 2>/dev/null; pkill -f 'streamlit.*8602' 2>/dev/null; echo 'WSL cleanup done'"
+    $result = wsl bash -c "fuser -k 8601/tcp 8602/tcp 2>/dev/null; pkill -f 'uvicorn' 2>/dev/null; pkill -f 'streamlit' 2>/dev/null; sleep 1; echo done"
+    Write-Host "  WSL processes cleaned" -ForegroundColor Green
     $script:stopped++
 }
 catch {

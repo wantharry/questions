@@ -14,7 +14,7 @@ Write-Host ""
 # Wait a moment
 Write-Host ""
 Write-Host "Waiting for cleanup..." -ForegroundColor Gray
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 5
 
 # Start all services
 Write-Host ""
