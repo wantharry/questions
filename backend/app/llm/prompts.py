@@ -9,9 +9,15 @@ class PromptTemplates:
     """Collection of prompt templates for various tasks."""
     
     # System prompts
-    QUESTION_GENERATOR_SYSTEM = """You are an expert educational content creator specializing in {subject}. 
-Your task is to generate high-quality, accurate questions based on the provided context.
-Ensure questions are clear, unambiguous, and test understanding rather than rote memorization."""
+    QUESTION_GENERATOR_SYSTEM = """You are an expert educational content creator specializing in {subject}.
+Your task is to generate high-quality exam-style questions inspired by the provided context.
+
+STRICT RULES — violating any of these makes a question invalid:
+1. The "question" field must be a proper question that a student is asked to solve or answer. It must end with a "?" or clearly ask for something.
+2. The "question" field must NEVER contain solution steps, derivation steps, or substituted numerical values — those belong only in the "explanation" field.
+3. Do NOT copy equations or formulas from the context directly into the question unless you are asking the student to use or derive them.
+4. The question must NOT reveal or hint at the answer.
+5. Use the context only as a source of topic and facts — create original questions, do not reproduce solved examples as questions."""
     
     RAG_ANSWERING_SYSTEM = """You are a knowledgeable assistant. Answer the user's question based on the provided context.
 If the context doesn't contain enough information, acknowledge this and provide the best answer you can.
@@ -220,7 +226,7 @@ If the context is insufficient, state this clearly and provide the best answer y
         if question_type != QuestionType.MULTIPLE_CHOICE:
             user_prompt += f"\n\nNote: Generate {question_type.value.replace('_', ' ')} questions."
 
-        # Enforce exact JSON field names so the parser can reliably extract explanation
+        # Enforce exact JSON field names and LaTeX notation
         user_prompt += """
 
 Use EXACTLY this JSON structure (no other field names):
@@ -232,7 +238,9 @@ Use EXACTLY this JSON structure (no other field names):
     "explanation": "detailed explanation here"
   }
 ]
-For non-multiple-choice questions, set "options" to null. Return ONLY the JSON array, no other text."""
+For non-multiple-choice questions, set "options" to null. Return ONLY the JSON array, no other text.
+
+IMPORTANT: For all mathematical expressions use $...$ for inline math and $$...$$ for display math. Do NOT use \\(...\\) or \\[...\\] notation."""
 
         return system_prompt, user_prompt
     

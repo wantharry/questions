@@ -1,4 +1,5 @@
 # Start All Services - Backend + Frontend
+# Automatically stops any running instances first
 # Usage: .\start_all.ps1
 
 Write-Host "========================================" -ForegroundColor Cyan
@@ -42,22 +43,16 @@ function Wait-ForService {
     return $false
 }
 
-# Step 1: Check if services are already running
-Write-Host "[1/4] Checking existing services..." -ForegroundColor Yellow
-
-if (Test-PortInUse $BACKEND_PORT) {
-    Write-Host "Backend already running on port $BACKEND_PORT" -ForegroundColor Yellow
-    $response = Read-Host "Stop and restart? (y/n)"
-    if ($response -eq 'y') {
-        Write-Host "Stopping existing services..." -ForegroundColor Yellow
-        & "$PSScriptRoot\stop_all.ps1"
-        Start-Sleep -Seconds 3
-    }
-}
+# Step 1: Stop any existing services
+Write-Host "[1/5] Stopping any existing services..." -ForegroundColor Yellow
+& "$PSScriptRoot\stop_all.ps1"
+Write-Host ""
+Write-Host "Waiting for cleanup..." -ForegroundColor Gray
+Start-Sleep -Seconds 3
 
 # Step 2: Clean Python cache
 Write-Host ""
-Write-Host "[2/4] Cleaning Python cache..." -ForegroundColor Yellow
+Write-Host "[2/5] Cleaning Python cache..." -ForegroundColor Yellow
 try {
     $cleanCmd = "cd $PROJECT_PATH/backend; find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; echo 'Cache cleaned'"
     wsl bash -c $cleanCmd
@@ -69,7 +64,7 @@ catch {
 
 # Step 3: Start Backend
 Write-Host ""
-Write-Host "[3/4] Starting Backend API on port $BACKEND_PORT..." -ForegroundColor Yellow
+Write-Host "[3/5] Starting Backend API on port $BACKEND_PORT..." -ForegroundColor Yellow
 
 $backendCmd = "cd $PROJECT_PATH && source venv/bin/activate && cd backend && uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT > /tmp/rag_backend.log 2>&1"
 
@@ -86,7 +81,7 @@ if (Wait-ForService "http://localhost:$BACKEND_PORT/health") {
 
 # Step 4: Start Frontend
 Write-Host ""
-Write-Host "[4/4] Starting Frontend UI on port $FRONTEND_PORT..." -ForegroundColor Yellow
+Write-Host "[4/5] Starting Frontend UI on port $FRONTEND_PORT..." -ForegroundColor Yellow
 
 $frontendCmd = "cd $PROJECT_PATH; source venv/bin/activate; cd frontend; streamlit run streamlit_app.py --server.port $FRONTEND_PORT --server.address 0.0.0.0"
 

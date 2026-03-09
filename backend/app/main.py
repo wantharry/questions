@@ -2,6 +2,8 @@
 FastAPI main application with all endpoints.
 """
 import time
+from datetime import datetime
+from typing import Dict, Any
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +18,14 @@ from app.models import (
     QueryResponse,
     QuestionGenerationRequest,
     QuestionGenerationResponse,
+    CreateIndexRequest,
+    IndexInfo,
+    ListIndexesResponse,
+    DeleteIndexRequest,
+    IndexIngestionRequest,
+    RetrievalMode,
+    AdvancedQuerySettings,
+    SearchType,
 )
 from app.models_advanced import HybridSearchRequest
 from app.ingestion.advanced_ingestion_manager import AdvancedIngestionManager
@@ -32,6 +42,9 @@ ingestion_manager: AdvancedIngestionManager = None
 retriever: HybridRetriever = None
 embedder: SentenceTransformerEmbedder = None
 question_generator: QuestionGenerator = None
+
+# Custom index storage (in-memory for now, could be persisted to DB)
+custom_indexes: Dict[str, Dict[str, Any]] = {}
 
 
 @asynccontextmanager
@@ -169,17 +182,40 @@ async def start_ingestion(request: IngestionRequest, background_tasks: Backgroun
 @app.get("/api/ingestion/status", response_model=IngestionStatus)
 async def get_ingestion_status():
     """Get current ingestion status."""
-    status = ingestion_manager.get_ingestion_status()
-    
+    try:
+        status = ingestion_manager.get_ingestion_status()
+    except Exception as e:
+        app_logger.warning(f"Status endpoint DB timeout or error: {e}")
+        # Return partial status from in-memory state if DB is locked
+        return IngestionStatus(
+            is_running=ingestion_manager.is_running,
+            current_document=ingestion_manager.current_document,
+            total_documents=ingestion_manager.session_total,
+            processed_documents=ingestion_manager.session_processed,
+            skipped_documents=ingestion_manager.session_skipped,
+            failed_documents=ingestion_manager.session_failed,
+            progress_percentage=(
+                ((ingestion_manager.session_processed + ingestion_manager.session_skipped) /
+                 ingestion_manager.session_total * 100)
+                if ingestion_manager.session_total > 0 else 0
+            ),
+        )
+
+    session_total = status.get('session_total', 0)
+    session_processed = status.get('session_processed', 0)
+    session_skipped = status.get('session_skipped', 0)
+
     progress = 0.0
-    if status['total_documents'] > 0:
-        progress = (status['completed_documents'] / status['total_documents']) * 100
-    
+    if session_total > 0:
+        progress = ((session_processed + session_skipped) / session_total) * 100
+
     return IngestionStatus(
         is_running=status['is_running'],
-        total_documents=status['total_documents'],
-        processed_documents=status['completed_documents'],
-        failed_documents=status['failed_documents'],
+        current_document=status.get('current_document'),
+        total_documents=session_total,
+        processed_documents=session_processed,
+        skipped_documents=session_skipped,
+        failed_documents=status.get('session_failed', 0),
         progress_percentage=progress,
     )
 
@@ -191,10 +227,14 @@ async def query_knowledge_base(request: QueryRequest):
     Query the knowledge base and get an answer.
     
     This retrieves relevant chunks and generates an answer using the LLM.
+    Supports advanced query settings for fine-grained control.
     """
     start_time = time.time()
     
     try:
+        # Use advanced settings if provided, otherwise use defaults
+        settings = request.settings or AdvancedQuerySettings()
+        
         # Lazy-load query components
         current_embedder = get_embedder()
         current_retriever = get_retriever()
@@ -202,12 +242,15 @@ async def query_knowledge_base(request: QueryRequest):
         # Generate query embedding
         query_embedding = current_embedder.embed_text(request.query)
         
+        # Determine retrieval count (use settings if available)
+        retrieval_count = settings.retrieval_chunks if request.settings else request.top_k
+        
         # Hybrid retrieval with automatic routing
         results = current_retriever.search(
             query=request.query,
             query_embedding=query_embedding,
-            top_k=request.top_k,
-            use_reranking=True,
+            top_k=retrieval_count,
+            use_reranking=settings.ai_reranker,
         )
         
         if not results:
@@ -217,6 +260,16 @@ async def query_knowledge_base(request: QueryRequest):
                 retrieved_chunks=[],
                 processing_time=time.time() - start_time,
             )
+        
+        # Apply reranker top chunks limit if reranking is enabled
+        if settings.ai_reranker and settings.reranker_top_chunks < len(results):
+            results = results[:settings.reranker_top_chunks]
+        
+        # Expand context window if enabled
+        if settings.expand_context_window and settings.context_window_size > 0:
+            # TODO: Implement context window expansion
+            # This would fetch surrounding chunks for each result
+            app_logger.info(f"Context window expansion requested but not yet implemented")
         
         # Format context from results
         context_parts = []
@@ -293,6 +346,193 @@ async def generate_questions(request: QuestionGenerationRequest):
     except Exception as e:
         app_logger.error(f"Question generation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Index Management endpoints
+@app.post("/api/indexes/create")
+async def create_index(request: CreateIndexRequest):
+    """Create a new custom index with specific configuration."""
+    if request.index_name in custom_indexes:
+        raise HTTPException(status_code=400, detail=f"Index '{request.index_name}' already exists")
+    
+    try:
+        # Store index configuration
+        custom_indexes[request.index_name] = {
+            "index_name": request.index_name,
+            "retrieval_mode": request.retrieval_mode,
+            "chunk_size": request.chunk_size,
+            "chunk_overlap": request.chunk_overlap,
+            "embedding_model": request.embedding_model,
+            "overview_llm": request.overview_llm,
+            "enable_contextual_retrieval": request.enable_contextual_retrieval,
+            "context_window": request.context_window,
+            "retrieval_llm": request.retrieval_llm,
+            "batch_size": request.batch_size,
+            "description": request.description,
+            "created_at": datetime.now(),
+            "last_updated": None,
+            "document_count": 0,
+            "chunk_count": 0,
+        }
+        
+        app_logger.info(f"Created new index: {request.index_name}")
+        
+        return {
+            "message": f"Index '{request.index_name}' created successfully",
+            "index_name": request.index_name,
+        }
+    
+    except Exception as e:
+        app_logger.error(f"Error creating index: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/indexes", response_model=ListIndexesResponse)
+async def list_indexes():
+    """List all available indexes (both default and custom)."""
+    try:
+        status = ingestion_manager.get_ingestion_status()
+        multi_index_stats = status.get('multi_index_stats', {})
+        
+        indexes = []
+        
+        # Add default indexes (content-type based)
+        for idx_name, idx_stats in multi_index_stats.items():
+            indexes.append(IndexInfo(
+                index_name=idx_name,
+                retrieval_mode=RetrievalMode.HYBRID,
+                chunk_size=settings.chunk_size,
+                chunk_overlap=settings.chunk_overlap,
+                embedding_model=settings.embedding_model,
+                document_count=idx_stats.get('document_count', 0),
+                chunk_count=idx_stats.get('document_count', 0),
+                created_at=datetime.now(),
+                description=f"Default {idx_name} content index",
+                config={}
+            ))
+        
+        # Add custom indexes
+        for idx_name, idx_config in custom_indexes.items():
+            indexes.append(IndexInfo(
+                index_name=idx_config['index_name'],
+                retrieval_mode=idx_config['retrieval_mode'],
+                chunk_size=idx_config['chunk_size'],
+                chunk_overlap=idx_config['chunk_overlap'],
+                embedding_model=idx_config['embedding_model'],
+                document_count=idx_config['document_count'],
+                chunk_count=idx_config['chunk_count'],
+                created_at=idx_config['created_at'],
+                last_updated=idx_config.get('last_updated'),
+                description=idx_config.get('description'),
+                config=idx_config
+            ))
+        
+        return ListIndexesResponse(
+            indexes=indexes,
+            total_count=len(indexes)
+        )
+    
+    except Exception as e:
+        app_logger.error(f"Error listing indexes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/indexes/{index_name}", response_model=IndexInfo)
+async def get_index_info(index_name: str):
+    """Get information about a specific index."""
+    # Check custom indexes first
+    if index_name in custom_indexes:
+        idx_config = custom_indexes[index_name]
+        return IndexInfo(
+            index_name=idx_config['index_name'],
+            retrieval_mode=idx_config['retrieval_mode'],
+            chunk_size=idx_config['chunk_size'],
+            chunk_overlap=idx_config['chunk_overlap'],
+            embedding_model=idx_config['embedding_model'],
+            document_count=idx_config['document_count'],
+            chunk_count=idx_config['chunk_count'],
+            created_at=idx_config['created_at'],
+            last_updated=idx_config.get('last_updated'),
+            description=idx_config.get('description'),
+            config=idx_config
+        )
+    
+    # Check default indexes
+    status = ingestion_manager.get_ingestion_status()
+    multi_index_stats = status.get('multi_index_stats', {})
+    
+    if index_name in multi_index_stats:
+        idx_stats = multi_index_stats[index_name]
+        return IndexInfo(
+            index_name=index_name,
+            retrieval_mode=RetrievalMode.HYBRID,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            embedding_model=settings.embedding_model,
+            document_count=idx_stats.get('document_count', 0),
+            chunk_count=idx_stats.get('document_count', 0),
+            created_at=datetime.now(),
+            description=f"Default {index_name} content index",
+            config={}
+        )
+    
+    raise HTTPException(status_code=404, detail=f"Index '{index_name}' not found")
+
+
+@app.delete("/api/indexes/{index_name}")
+async def delete_index(index_name: str, request: DeleteIndexRequest):
+    """Delete a custom index."""
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="Must confirm deletion")
+    
+    if index_name not in custom_indexes:
+        raise HTTPException(status_code=404, detail=f"Index '{index_name}' not found")
+    
+    try:
+        # Remove index configuration
+        del custom_indexes[index_name]
+        
+        app_logger.info(f"Deleted index: {index_name}")
+        
+        return {"message": f"Index '{index_name}' deleted successfully"}
+    
+    except Exception as e:
+        app_logger.error(f"Error deleting index: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/indexes/{index_name}/ingest")
+async def ingest_into_index(index_name: str, request: IndexIngestionRequest, background_tasks: BackgroundTasks):
+    """Ingest documents into a specific index."""
+    # Verify index exists
+    if index_name not in custom_indexes:
+        # Check if it's a default index
+        status = ingestion_manager.get_ingestion_status()
+        multi_index_stats = status.get('multi_index_stats', {})
+        if index_name not in multi_index_stats:
+            raise HTTPException(status_code=404, detail=f"Index '{index_name}' not found")
+    
+    if ingestion_manager.is_running:
+        raise HTTPException(status_code=400, detail="Ingestion already running")
+    
+    # Convert to standard ingestion request
+    ingestion_req = IngestionRequest(
+        folder_path=request.folder_path if request.folder_path else "",
+        recursive=request.recursive,
+        file_patterns=request.file_patterns,
+        force_reprocess=request.force_reprocess,
+    )
+    
+    app_logger.info(f"Starting ingestion into index '{index_name}': {request.folder_path}")
+    
+    # Run ingestion in background
+    background_tasks.add_task(ingestion_manager.ingest_documents, ingestion_req)
+    
+    return {
+        "message": f"Ingestion started for index '{index_name}'",
+        "index_name": index_name,
+        "folder_path": request.folder_path,
+    }
 
 
 # Statistics endpoint

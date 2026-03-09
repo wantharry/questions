@@ -1,0 +1,3 @@
+@echo off
+echo Starting Enhanced Frontend (Multi-Index UI) on port 8602 via WSL...
+wsl bash -c "cd /mnt/c/Users/openclaw/harry/projects/IIT/questions/questionsapp && ./venv/bin/streamlit run frontend/streamlit_app_v2.py --server.port 8602 --server.address 0.0.0.0"

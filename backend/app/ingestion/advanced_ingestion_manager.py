@@ -68,6 +68,13 @@ class AdvancedIngestionManager:
         self.executor = ThreadPoolExecutor(max_workers=settings.max_workers)
         self.is_running = False
         self.current_session_id: Optional[str] = None
+
+        # Live session progress (reset each run)
+        self.session_total: int = 0
+        self.session_processed: int = 0
+        self.session_failed: int = 0
+        self.session_skipped: int = 0
+        self.current_document: Optional[str] = None
         
         app_logger.info("Initialized AdvancedIngestionManager with hybrid architecture")
     
@@ -303,7 +310,7 @@ class AdvancedIngestionManager:
         finally:
             db.close()
     
-    async def ingest_documents(self, request: IngestionRequest) -> Dict[str, Any]:
+    def ingest_documents(self, request: IngestionRequest) -> Dict[str, Any]:
         """
         Ingest documents using advanced hybrid architecture.
         
@@ -338,22 +345,31 @@ class AdvancedIngestionManager:
             processed_count = 0
             failed_count = 0
             skipped_count = 0
-            
+
+            # Reset live session counters
+            self.session_total = total_docs
+            self.session_processed = 0
+            self.session_failed = 0
+            self.session_skipped = 0
+            self.current_document = None
+
             # Process in batches
             batch = []
             for idx, file_path in enumerate(documents):
                 try:
                     # Compute hash for change detection
                     file_hash = self.doc_processor.compute_file_hash(file_path)
-                    
+
                     # Skip if already processed
                     if settings.skip_existing and not request.force_reprocess:
                         if self._is_document_processed(file_path, file_hash):
                             app_logger.info(f"Skipping already processed: {file_path.name}")
                             skipped_count += 1
+                            self.session_skipped += 1
                             continue
-                    
+
                     # Process document
+                    self.current_document = file_path.name
                     app_logger.info(f"Processing [{idx+1}/{total_docs}]: {file_path.name}")
                     processed_doc = self.doc_processor.process_document(file_path)
                     
@@ -385,6 +401,7 @@ class AdvancedIngestionManager:
                     )
                     
                     processed_count += 1
+                    self.session_processed += 1
                     batch.append(file_path)
                     
                     # Save checkpoint every batch_size documents
@@ -397,7 +414,8 @@ class AdvancedIngestionManager:
                 except Exception as e:
                     app_logger.error(f"Failed to process {file_path}: {e}", exc_info=True)
                     failed_count += 1
-                    
+                    self.session_failed += 1
+
                     # Mark as failed in database
                     db = get_session()
                     try:
@@ -466,6 +484,7 @@ class AdvancedIngestionManager:
         finally:
             self.is_running = False
             self.current_session_id = None
+            self.current_document = None
     
     def get_ingestion_status(self) -> Dict[str, Any]:
         """Get current ingestion status."""
@@ -482,6 +501,11 @@ class AdvancedIngestionManager:
             return {
                 "is_running": self.is_running,
                 "current_session_id": self.current_session_id,
+                "current_document": self.current_document,
+                "session_total": self.session_total,
+                "session_processed": self.session_processed,
+                "session_failed": self.session_failed,
+                "session_skipped": self.session_skipped,
                 "total_documents": total,
                 "completed_documents": completed,
                 "failed_documents": failed,

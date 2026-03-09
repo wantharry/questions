@@ -105,12 +105,17 @@ class IngestionLog(Base):
 
 # Database engine and session
 def get_engine():
-    """Create SQLAlchemy engine."""
+    """Create SQLAlchemy engine with timeout."""
     db_path = settings.metadata_db_path
     engine = create_engine(
         f"sqlite:///{db_path}",
         echo=False,
-        connect_args={"check_same_thread": False}
+        connect_args={
+            "check_same_thread": False,
+            "timeout": 5  # 5-second timeout for DB locks
+        },
+        pool_pre_ping=True,  # Verify connections before using
+        pool_recycle=3600,   # Recycle connections every hour
     )
     return engine
 

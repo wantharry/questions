@@ -17,57 +17,46 @@ API_BASE_URL = "http://localhost:8601"
 
 def render_latex_text(text: str) -> str:
     r"""
-    Convert LaTeX expressions in text to Streamlit-compatible format.
-    Handles both inline $...$ and display $$...$$ math.
-    Also handles bare LaTeX like \vec{A}, \hat{i}, etc.
+    Convert LaTeX expressions to Streamlit-compatible $...$ / $$...$$ format.
+
+    Handles multiple LaTeX delimiters:
+      \[...\]     -> $$...$$  (display math, AMS style)
+      \(...\)     -> $...$    (inline math, AMS style)
+      $$...$$     -> kept as-is (display math, already correct)
+      $...$       -> kept as-is (inline math, already correct)
+      {...}       -> wraps in $ for common formulas
     """
     if not text:
         return text
-    
-    # Protect already properly formatted LaTeX
-    # Handle display math $$...$$
-    text = re.sub(r'\$\$(.*?)\$\$', r'$$\1$$', text, flags=re.DOTALL)
-    
-    # Handle inline math $...$
-    text = re.sub(r'\$([^\$]+?)\$', r'$\1$', text)
-    
-    # Handle bare LaTeX expressions (not already in $ or $$)
-    # Common patterns: \vec{}, \hat{}, \frac{}{}, \alpha, etc.
-    # This is a simplified approach - wrap bare LaTeX in $...$
-    def wrap_bare_latex(match):
-        latex = match.group(0)
-        # Check if already in math mode
-        return f"${latex}$"
-    
-    # Match LaTeX commands not already in $...$ or $$...$$
-    # This regex looks for backslash commands
-    # Only wrap if not already between $ symbols
-    parts = []
-    last_end = 0
-    in_math = False
-    
-    for match in re.finditer(r'\$+', text):
-        # Track if we're entering or leaving math mode
-        dollar_count = len(match.group(0))
-        in_math = not in_math
-    
-    # More robust: wrap sequences with backslash commands if not in $
-    if r'\vec{' in text or r'\hat{' in text or r'\frac{' in text:
-        # Split by $ to find non-math parts
-        segments = re.split(r'(\$+[^\$]*\$+)', text)
-        result = []
-        for segment in segments:
-            if segment.startswith('$'):
-                # Already math mode
-                result.append(segment)
-            elif '\\' in segment and any(cmd in segment for cmd in [r'\vec', r'\hat', r'\frac', r'\alpha', r'\beta', r'\gamma']):
-                # Has LaTeX commands but not in math mode - wrap it
-                result.append(f"${segment}$")
+
+    # 1. Display math: \[...\] → $$...$$
+    text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+
+    # 2. Inline math: \(...\) → $...$
+    text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+
+    # 3. Standalone formulas without any delimiters: if text has \frac, \sqrt, \int, etc
+    # and is NOT already wrapped in $, wrap the whole line in $...$
+    lines = text.split('\n')
+    result_lines = []
+    for line in lines:
+        # Skip lines already in math mode
+        if '$' in line or '$$' in line:
+            result_lines.append(line)
+        # Wrap lines with bare LaTeX commands in $...$
+        elif any(cmd in line for cmd in [r'\frac', r'\sqrt', r'\int', r'\sum', r'\prod',
+                                         r'\sin', r'\cos', r'\tan', r'\log', r'\exp',
+                                         r'\alpha', r'\beta', r'\gamma', r'\delta', r'\pi',
+                                         r'\infty', r'\partial', r'\nabla', r'\pm', r'\times']):
+            # Only wrap if it looks like a formula (has {} or ^/_ operators)
+            if '{' in line or '^' in line or '_' in line:
+                result_lines.append(f"${line}$")
             else:
-                result.append(segment)
-        return ''.join(result)
-    
-    return text
+                result_lines.append(line)
+        else:
+            result_lines.append(line)
+
+    return '\n'.join(result_lines)
 
 
 def convert_windows_to_wsl_path(path: str) -> str:
@@ -89,7 +78,7 @@ def convert_windows_to_wsl_path(path: str) -> str:
 def check_api_health():
     """Check if the API is running."""
     try:
-        response = requests.get(f"{API_BASE_URL}/health", timeout=2)
+        response = requests.get(f"{API_BASE_URL}/health", timeout=5)
         return response.status_code == 200
     except:
         return False
@@ -132,13 +121,16 @@ def get_ingestion_status():
         return None
 
 
-def query_knowledge_base(query: str, top_k: int = 5):
+def query_knowledge_base(query: str, top_k: int = 5, settings: Optional[dict] = None):
     """Query the knowledge base."""
     try:
         payload = {
             "query": query,
             "top_k": top_k,
         }
+        if settings:
+            payload["settings"] = settings
+        
         response = requests.post(f"{API_BASE_URL}/api/query", json=payload, timeout=60)
         if response.status_code == 200:
             return response.json()
@@ -252,6 +244,9 @@ with st.sidebar:
         st.error("❌ API Not Connected")
         st.warning("Make sure the backend is running:\n```\npython -m app.main\n```")
 
+# Fetch ingestion status once — reused across the whole page
+ingestion_status = get_ingestion_status()
+
 # Main tabs
 tab1, tab2 = st.tabs(["📁 Knowledge Addition", "🔍 Query & Questions"])
 
@@ -313,39 +308,62 @@ with tab1:
                 if not Path(wsl_path).exists():
                     st.error(f"❌ Folder does not exist: `{wsl_path}`")
                 else:
-                    with st.spinner("Starting ingestion..."):
-                        success, result = start_ingestion(
-                            wsl_path, recursive, file_patterns, force_reprocess
-                        )
-                        if success:
-                            st.success("✅ Ingestion started successfully!")
-                            st.json(result)
-                        else:
-                            st.error(f"Failed to start ingestion: {result.get('error', 'Unknown error')}")
+                    success, result = start_ingestion(
+                        wsl_path, recursive, file_patterns, force_reprocess
+                    )
+                    if success:
+                        st.success("✅ Ingestion started! Watch status on the right →")
+                    else:
+                        st.error(f"Failed to start ingestion: {result.get('error', 'Unknown error')}")
     
     with col2:
-        st.markdown("### Ingestion Status")
-        
-        # Status refresh button
-        if st.button("🔄 Refresh Status"):
+        st.markdown("### 📊 Status")
+        if st.button("🔄 Refresh", key="status_refresh"):
             st.rerun()
-        
-        status = get_ingestion_status()
-        if status:
-            if status['is_running']:
-                st.info("⏳ Ingestion in progress...")
-                st.progress(status['progress_percentage'] / 100)
+
+        if ingestion_status:
+            if ingestion_status['is_running']:
+                st.warning("⏳ Ingestion running...")
+                total = ingestion_status['total_documents']
+                processed = ingestion_status['processed_documents']
+                skipped = ingestion_status.get('skipped_documents', 0)
+                pct = ingestion_status['progress_percentage']
+
+                st.progress(min(pct / 100, 1.0))
+                st.caption(f"{processed + skipped}/{total} ({pct:.0f}%)")
+
+                current = ingestion_status.get('current_document')
+                if current:
+                    st.caption(f"📄 {current}")
             else:
-                st.success("✅ No active ingestion")
-            
-            st.metric("Processed", status['processed_documents'])
-            st.metric("Total", status['total_documents'])
-            st.metric("Failed", status['failed_documents'])
-            
-            if status['is_running']:
-                # Auto-refresh while running
-                time.sleep(2)
-                st.rerun()
+                st.success("✅ Ready")
+                if total := ingestion_status['total_documents']:
+                    st.caption(f"📦 {total} docs")
+
+    # Full-width live progress — always shown and always updates while running
+    if ingestion_status and ingestion_status['is_running']:
+        st.markdown("---")
+        st.markdown("### ⏳ Ingestion in Progress")
+
+        total = ingestion_status['total_documents']
+        processed = ingestion_status['processed_documents']
+        skipped = ingestion_status.get('skipped_documents', 0)
+        failed = ingestion_status['failed_documents']
+        done = processed + skipped
+        pct = ingestion_status['progress_percentage']
+
+        current = ingestion_status.get('current_document')
+        if current:
+            st.info(f"📄 **Processing:** {current}")
+
+        st.progress(min(pct / 100, 1.0))
+        st.caption(f"**Progress:** {done} of {total} files ({pct:.1f}%)")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total", total)
+        m2.metric("✅ Processed", processed)
+        m3.metric("⏭️ Skipped", skipped)
+        m4.metric("❌ Failed", failed)
     
     # Instructions
     st.markdown("---")
@@ -384,6 +402,76 @@ with tab2:
             height=100
         )
         
+        # Advanced Settings
+        with st.expander("⚙️ Advanced Query Settings", expanded=False):
+            st.markdown("#### General Settings")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                query_decomposition = st.checkbox("Query decomposition", value=False, help="Break complex queries into sub-queries")
+                pruning = st.checkbox("Pruning", value=False, help="Remove irrelevant retrieved chunks")
+                verify_answer = st.checkbox("Verify answer", value=True, help="Verify answer quality")
+            
+            with col2:
+                compose_sub_answers = st.checkbox("Compose sub-answers", value=False, help="Merge answers from decomposed sub-queries")
+                streaming = st.checkbox("Streaming", value=False, help="Stream response tokens (not yet implemented)")
+            
+            st.markdown("---")
+            st.markdown("#### Retrieval Settings")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                retrieval_llm = st.selectbox(
+                    "LLM",
+                    ["qwen2.5:7b", "qwen3:0.6b", "llama3.2:3b", "Default"],
+                    index=0,
+                    help="LLM for retrieval tasks"
+                )
+            
+            with col2:
+                search_type = st.selectbox(
+                    "Search type",
+                    ["hybrid", "vector", "fts"],
+                    index=0,
+                    help="Hybrid = Vector + Full-Text Search"
+                )
+            
+            retrieval_chunks = st.slider(
+                "Retrieval chunks",
+                min_value=5,
+                max_value=50,
+                value=20,
+                help="Number of chunks to retrieve initially"
+            )
+            st.caption(f"{retrieval_chunks} chunks")
+            
+            st.markdown("---")
+            st.markdown("#### Reranking & Context")
+            
+            ai_reranker = st.checkbox("AI reranker", value=True, help="Use AI-based reranking for better results")
+            
+            reranker_top_chunks = st.slider(
+                "Reranker top chunks",
+                min_value=3,
+                max_value=20,
+                value=10,
+                disabled=not ai_reranker,
+                help="Number of top chunks to keep after reranking"
+            )
+            st.caption(f"{reranker_top_chunks} chunks")
+            
+            expand_context_window = st.checkbox("Expand context window", value=False, help="Include surrounding chunks for more context")
+            
+            context_window_size = st.slider(
+                "Context window size",
+                min_value=0,
+                max_value=5,
+                value=1,
+                disabled=not expand_context_window,
+                help="Number of surrounding chunks to include"
+            )
+            st.caption(f"{context_window_size} chunks")
+        
         col1, col2 = st.columns([3, 1])
         with col1:
             query_button = st.button("🔍 Search", type="primary", use_container_width=True)
@@ -391,8 +479,24 @@ with tab2:
             top_k = st.selectbox("Top K Results", [3, 5, 10], index=1)
         
         if query_button and query_text:
+            # Build settings object
+            query_settings = {
+                "query_decomposition": query_decomposition,
+                "compose_sub_answers": compose_sub_answers,
+                "pruning": pruning,
+                "verify_answer": verify_answer,
+                "streaming": streaming,
+                "retrieval_llm": retrieval_llm if retrieval_llm != "Default" else None,
+                "search_type": search_type,
+                "retrieval_chunks": retrieval_chunks,
+                "ai_reranker": ai_reranker,
+                "reranker_top_chunks": reranker_top_chunks,
+                "expand_context_window": expand_context_window,
+                "context_window_size": context_window_size,
+            }
+            
             with st.spinner("Searching knowledge base..."):
-                result = query_knowledge_base(query_text, top_k)
+                result = query_knowledge_base(query_text, top_k, query_settings)
                 
                 if result:
                     st.markdown("### Answer")
@@ -513,3 +617,10 @@ st.markdown(
     "</div>",
     unsafe_allow_html=True
 )
+
+# Auto-refresh while ingestion is running
+# Fetch fresh status on every rerun to avoid stale data
+current_status = get_ingestion_status()
+if current_status and current_status['is_running']:
+    time.sleep(2)
+    st.rerun()
