@@ -1,0 +1,58 @@
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# LangChain Ecosystem (RAG orchestration)
+langchain==0.1.4
+langchain-community==0.0.16
+langchain-core==0.1.16
+
+# LLM Backends (Pluggable)
+ollama==0.1.6
+openai==1.10.0  # For OpenAI-compatible APIs
+
+# Embeddings
+sentence-transformers==2.3.1
+torch==2.1.2
+transformers==4.37.2
+
+# Reranking (Cross-Encoder)
+# Note: sentence-transformers includes cross-encoder support
+
+# Vector Store
+faiss-cpu==1.7.4  # Use faiss-gpu for GPU acceleration
+chromadb==0.4.22  # Alternative vector store
+
+# Document Processing
+PyMuPDF==1.23.26  # PDF extraction
+pdf2image==1.17.0  # PDF to images
+Pillow==10.2.0  # Image processing
+pytesseract==0.3.10  # OCR
+python-docx==1.1.0  # Word documents
+beautifulsoup4==4.12.3  # HTML parsing
+lxml==5.1.0
+markdown==3.5.2
+python-magic-bin==0.4.14; sys_platform == 'win32'  # File type detection
+python-magic==0.4.27; sys_platform != 'win32'
+
+# Database & Storage
+sqlalchemy==2.0.25
+aiosqlite==0.19.0
+
+# Utilities
+python-multipart==0.0.6
+aiofiles==23.2.1
+tqdm==4.66.1
+tenacity==8.2.3  # Retry logic
+pyyaml==6.0.1
+
+# Monitoring & Logging
+loguru==0.7.2
+python-json-logger==2.0.7
+
+# Testing (optional)
+pytest==7.4.4
+pytest-asyncio==0.23.3
+httpx==0.26.0

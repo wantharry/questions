@@ -1,0 +1,11 @@
+# UI Framework
+streamlit==1.30.0
+
+# API Client
+requests==2.31.0
+httpx==0.26.0
+
+# Utilities
+pandas==2.2.0
+plotly==5.18.0  # For visualizations
+python-dotenv==1.0.1
