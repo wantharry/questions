@@ -114,15 +114,18 @@ class MultiIndexManager:
             try:
                 results = self.indexes[index_type].search(
                     query_embedding,
-                    top_k=top_k,
-                    filter_metadata=filter_metadata
+                    top_k=top_k
                 )
                 
-                # Add index type to results
-                for result in results:
-                    result['metadata']['index_type'] = index_type.value
-                
-                all_results.extend(results)
+                # Convert tuples to dict format and add index type
+                for idx, score, metadata in results:
+                    metadata['index_type'] = index_type.value
+                    all_results.append({
+                        'id': idx,
+                        'score': score,
+                        'metadata': metadata,
+                        'text': metadata.get('text', '')
+                    })
             
             except Exception as e:
                 app_logger.error(f"Error searching {index_type.value} index: {e}")
@@ -147,8 +150,7 @@ class MultiIndexManager:
         
         return self.indexes[index_type].search(
             query_embedding,
-            top_k=top_k,
-            filter_metadata=filter_metadata
+            top_k=top_k
         )
     
     def _map_content_to_index(self, content_type: str) -> IndexType:
@@ -164,7 +166,7 @@ class MultiIndexManager:
             ContentType.SOLUTION: IndexType.SOLUTION,
             ContentType.DIAGRAM: IndexType.GENERAL,
             ContentType.TABLE: IndexType.GENERAL,
-            ContentType.OTHER: IndexType.GENERAL,
+            ContentType.UNKNOWN: IndexType.GENERAL,
         }
         
         # Handle string or ContentType enum

@@ -223,6 +223,7 @@ async def query_knowledge_base(request: QueryRequest):
         for i, result in enumerate(results):
             context_parts.append(f"Source {i+1}:\n{result['text']}")
             chunks.append({
+                'chunk_id': result['metadata'].get('chunk_id', result.get('id', f'chunk_{i}')),
                 'content': result['text'],
                 'source_file': result['metadata'].get('file_name', 'Unknown'),
                 'page_number': result['metadata'].get('page_number'),

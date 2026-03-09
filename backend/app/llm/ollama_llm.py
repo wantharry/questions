@@ -40,9 +40,14 @@ class OllamaLLM(BaseLLM):
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
             
+            # Combine system and user prompts for /api/generate endpoint
+            full_prompt = prompt
+            if system_prompt:
+                full_prompt = f"{system_prompt}\n\n{prompt}"
+            
             payload = {
                 "model": self.model_name,
-                "messages": messages,
+                "prompt": full_prompt,
                 "stream": False,
                 "options": {
                     "temperature": temperature or self.temperature,
@@ -51,17 +56,17 @@ class OllamaLLM(BaseLLM):
             }
             
             response = await self.client.post(
-                f"{self.base_url}/api/chat",
+                f"{self.base_url}/api/generate",
                 json=payload
             )
             response.raise_for_status()
             data = response.json()
             
             return LLMResponse(
-                text=data["message"]["content"],
+                text=data["response"],
                 model=self.model_name,
                 tokens_used=data.get("eval_count"),
-                finish_reason=data.get("done_reason"),
+                finish_reason=data.get("done_reason") if data.get("done") else None,
                 metadata={
                     "total_duration": data.get("total_duration"),
                     "load_duration": data.get("load_duration"),
@@ -81,14 +86,14 @@ class OllamaLLM(BaseLLM):
     ) -> AsyncIterator[str]:
         """Stream response from Ollama."""
         try:
-            messages = []
+            # Combine system and user prompts for /api/generate endpoint
+            full_prompt = prompt
             if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
+                full_prompt = f"{system_prompt}\n\n{prompt}"
             
             payload = {
                 "model": self.model_name,
-                "messages": messages,
+                "prompt": full_prompt,
                 "stream": True,
                 "options": {
                     "temperature": temperature or self.temperature,
@@ -98,7 +103,7 @@ class OllamaLLM(BaseLLM):
             
             async with self.client.stream(
                 "POST",
-                f"{self.base_url}/api/chat",
+                f"{self.base_url}/api/generate",
                 json=payload,
                 timeout=self.timeout
             ) as response:
@@ -107,10 +112,10 @@ class OllamaLLM(BaseLLM):
                     if line:
                         import json
                         data = json.loads(line)
-                        if "message" in data:
-                            content = data["message"].get("content", "")
-                            if content:
-                                yield content
+                        if "response" in data:
+                            response_text = data.get("response", "")
+                            if response_text:
+                                yield response_text
         except Exception as e:
             app_logger.error(f"Ollama streaming error: {e}")
             raise

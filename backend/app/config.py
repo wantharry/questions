@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     """Application settings with validation and type safety."""
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=".env",  # Look in backend directory (working dir when running with --app-dir backend)
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore"
@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     
     # LLM Configuration (Pluggable)
     llm_provider: Literal["ollama", "openai", "llama_cpp", "vllm"] = Field(default="ollama")
-    llm_model: str = Field(default="mistral:7b-instruct")
+    llm_model: str = Field(default="qwen2.5:7b")
     llm_base_url: str = Field(default="http://localhost:11434")
     llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     llm_max_tokens: int = Field(default=2048, ge=1)

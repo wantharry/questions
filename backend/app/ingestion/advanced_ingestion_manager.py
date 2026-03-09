@@ -261,7 +261,7 @@ class AdvancedIngestionManager:
                     try:
                         content_type = ContentType(content_type)
                     except:
-                        content_type = ContentType.OTHER
+                        content_type = ContentType.UNKNOWN
                 
                 # Map content type to index type
                 if content_type in [ContentType.THEORY, ContentType.DEFINITION, ContentType.THEOREM]:

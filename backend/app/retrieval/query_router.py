@@ -137,9 +137,9 @@ class QueryRouter:
         # Return intent with highest score
         max_intent = max(scores, key=scores.get)
         
-        # If no clear intent, default to GENERAL_SEARCH
+        # If no clear intent, default to GENERAL
         if scores[max_intent] == 0:
-            return QueryIntent.GENERAL_SEARCH
+            return QueryIntent.GENERAL
         
         return max_intent
     
