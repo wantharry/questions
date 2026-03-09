@@ -76,11 +76,11 @@ class MultiIndexManager:
         
         # Add to specified index
         if index_type in self.indexes:
-            self.indexes[index_type].add_vectors(texts, embeddings, metadatas)
-            app_logger.info(f"Added {len(texts)} documents to {index_type.value} index")
+            self.indexes[index_type].add_vectors(embeddings, metadatas)
+            app_logger.info(f"Added {len(embeddings)} documents to {index_type.value} index")
         else:
             # Fallback to general index
-            self.indexes[IndexType.GENERAL].add_vectors(texts, embeddings, metadatas)
+            self.indexes[IndexType.GENERAL].add_vectors(embeddings, metadatas)
             app_logger.warning(f"Unknown index type {index_type}, added to general index")
     
     def search(

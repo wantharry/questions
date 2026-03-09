@@ -44,25 +44,21 @@ async def lifespan(app: FastAPI):
     app_logger.info("Starting application with Advanced Hybrid RAG...")
     
     try:
+        # Only initialize ingestion manager on startup (needed for ingestion)
+        # This loads the embedding model which is required for document vectorization
+        app_logger.info("Initializing ingestion manager...")
         ingestion_manager = AdvancedIngestionManager()
-        retriever = HybridRetriever(
-            multi_index_manager=ingestion_manager.multi_index,
-            bm25_index=ingestion_manager.bm25_index,
-        )
-        embedder = SentenceTransformerEmbedder()
-        question_generator = QuestionGenerator()
+        app_logger.info("Ingestion manager ready")
         
-        # Verify LLM availability
-        llm_available = await LLMManager.health_check()
-        if not llm_available:
-            app_logger.warning(
-                f"LLM provider '{settings.llm_provider}' not available. "
-                "Make sure Ollama or your chosen LLM service is running."
-            )
+        # Retriever, embedder, and question generator are lazy-loaded on first use
+        # This allows fast startup for ingestion-only workflows
+        retriever = None
+        embedder = None
+        question_generator = None
         
-        app_logger.info("Application started successfully")
+        app_logger.info("Application started successfully (query components will load on first use)")
     except Exception as e:
-        app_logger.error(f"Startup error: {e}")
+        app_logger.error(f"Startup error: {e}", exc_info=True)
         raise
     
     yield
@@ -87,6 +83,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Lazy initialization helpers
+def get_retriever():
+    """Lazy-load retriever on first query."""
+    global retriever
+    if retriever is None:
+        app_logger.info("Initializing retriever for first query...")
+        retriever = HybridRetriever(
+            multi_index_manager=ingestion_manager.multi_index,
+            bm25_index=ingestion_manager.bm25_index,
+        )
+        app_logger.info("Retriever ready")
+    return retriever
+
+
+def get_embedder():
+    """Lazy-load embedder on first query."""
+    global embedder
+    if embedder is None:
+        app_logger.info("Initializing query embedder...")
+        embedder = SentenceTransformerEmbedder()
+        app_logger.info("Query embedder ready")
+    return embedder
+
+
+def get_question_generator():
+    """Lazy-load question generator on first use."""
+    global question_generator
+    if question_generator is None:
+        app_logger.info("Initializing question generator...")
+        question_generator = QuestionGenerator()
+        app_logger.info("Question generator ready")
+    return question_generator
 
 
 # Health check endpoint
@@ -164,11 +194,15 @@ async def query_knowledge_base(request: QueryRequest):
     start_time = time.time()
     
     try:
+        # Lazy-load query components
+        current_embedder = get_embedder()
+        current_retriever = get_retriever()
+        
         # Generate query embedding
-        query_embedding = embedder.embed(request.query)
+        query_embedding = current_embedder.embed(request.query)
         
         # Hybrid retrieval with automatic routing
-        results = retriever.search(
+        results = current_retriever.search(
             query=request.query,
             query_embedding=query_embedding,
             top_k=request.top_k,
@@ -233,7 +267,9 @@ async def generate_questions(request: QuestionGenerationRequest):
     start_time = time.time()
     
     try:
-        questions = await question_generator.generate_questions(request)
+        # Lazy-load question generator
+        current_generator = get_question_generator()
+        questions = await current_generator.generate_questions(request)
         
         # Get the context that was used
         if request.context:
@@ -242,7 +278,7 @@ async def generate_questions(request: QuestionGenerationRequest):
             query = f"{request.subject.value}"
             if request.topic:
                 query += f" {request.topic}"
-            context_used = retriever.get_context_for_query(query, top_k=5)
+            context_used = get_retriever().get_context_for_query(query, top_k=5)
             context_used = context_used[:500] + "..." if len(context_used) > 500 else context_used
         
         processing_time = time.time() - start_time
