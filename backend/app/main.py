@@ -245,12 +245,34 @@ async def query_knowledge_base(request: QueryRequest):
         # Determine retrieval count (use settings if available)
         retrieval_count = settings.retrieval_chunks if request.settings else request.top_k
         
+        # Determine which indexes to search
+        specific_indexes = None
+        if request.index_name and request.index_name != "default":
+            # Map index name to IndexType for the default specialized indexes
+            index_mapping = {
+                "theory": IndexType.THEORY,
+                "formula": IndexType.FORMULA,
+                "exercise": IndexType.EXERCISE,
+                "solution": IndexType.SOLUTION,
+                "general": IndexType.GENERAL,
+            }
+            
+            if request.index_name in index_mapping:
+                specific_indexes = [index_mapping[request.index_name]]
+                app_logger.info(f"Query targeting specific index: {request.index_name}")
+            else:
+                # Custom index - for now log it, could be extended to support custom indexes
+                app_logger.info(f"Query targeting custom index: {request.index_name} (routing via default behavior)")
+        else:
+            app_logger.info("Query searching all indexes with automatic routing")
+        
         # Hybrid retrieval with automatic routing
         results = current_retriever.search(
             query=request.query,
             query_embedding=query_embedding,
             top_k=retrieval_count,
             use_reranking=settings.ai_reranker,
+            specific_indexes=specific_indexes,
         )
         
         if not results:
