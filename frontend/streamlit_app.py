@@ -520,7 +520,7 @@ with tab2:
         with col1:
             query_button = st.button("🔍 Search", type="primary", use_container_width=True)
         with col2:
-            top_k = st.selectbox("Top K Results", [3, 5, 10], index=1)
+            top_k = st.selectbox("Top K Results", [5, 10, 20, 30, 50], index=4)
         
         if query_button and query_text:
             with st.spinner("Searching knowledge base..."):

@@ -251,15 +251,17 @@ class HybridRetriever:
         query: str,
         top_k: int = 5,
         max_tokens: int = 4000,
+        specific_indexes: List[IndexType] = None,
     ) -> str:
         """
         Retrieve and format context for a query using hybrid search.
-        
+
         Args:
             query: Natural language query
             top_k: Number of chunks to retrieve
             max_tokens: Approximate max tokens to include
-        
+            specific_indexes: Specific indexes to search (None = search all)
+
         Returns:
             Formatted context string
         """

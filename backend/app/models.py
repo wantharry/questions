@@ -92,7 +92,7 @@ class IngestionStatus(BaseModel):
 class QueryRequest(BaseModel):
     """Request model for querying the knowledge base."""
     query: str = Field(..., min_length=1, description="Natural language query")
-    top_k: int = Field(default=5, ge=1, le=50, description="Number of results to retrieve")
+    top_k: int = Field(default=50, ge=1, le=50, description="Number of results to retrieve")
     subject_filter: Optional[Subject] = Field(default=None, description="Filter by subject")
     index_filter: Optional[List[str]] = Field(default=None, description="Specific indexes to search (None = search all available indexes)")
     model: Optional[str] = Field(default=None, description="LLM model to use (None = use default from config)")
