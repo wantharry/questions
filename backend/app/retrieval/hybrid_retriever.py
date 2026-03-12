@@ -283,7 +283,8 @@ class HybridRetriever:
                 query=query,
                 query_embedding=query_embedding,
                 top_k=top_k,
-                use_reranking=True
+                use_reranking=True,
+                specific_indexes=specific_indexes,
             )
             
             if not results:

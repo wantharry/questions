@@ -47,7 +47,18 @@ class QuestionGenerator:
                     query = f"{request.subject.value}"
                     if request.topic:
                         query += f" {request.topic}"
-                    context = self.retriever.get_context_for_query(query, top_k=8)
+                    
+                    # Convert index_filter to IndexType if provided
+                    specific_indexes = None
+                    if request.index_filter:
+                        from app.models_advanced import IndexType
+                        specific_indexes = [IndexType.from_string(idx) for idx in request.index_filter]
+                    
+                    context = self.retriever.get_context_for_query(
+                        query, 
+                        top_k=8,
+                        specific_indexes=specific_indexes,
+                    )
                 else:
                     # Use provided context or generate generic questions
                     context = f"Generate {request.question_type.value} questions about {request.subject.value}"
@@ -69,7 +80,7 @@ class QuestionGenerator:
                 f"{request.question_type.value} questions for {request.subject.value}"
             )
             
-            response = await self.llm.generate(
+            response = await llm_to_use.generate(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
                 temperature=0.8,  # Slightly higher for variety

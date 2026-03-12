@@ -128,6 +128,24 @@ class OllamaLLM(BaseLLM):
         except Exception:
             return False
     
+    async def list_models(self) -> list:
+        """List available models from Ollama."""
+        try:
+            response = await self.client.get(f"{self.base_url}/api/tags")
+            response.raise_for_status()
+            data = response.json()
+            models = []
+            for model in data.get('models', []):
+                models.append({
+                    'name': model.get('name'),
+                    'size': model.get('size'),
+                    'modified_at': model.get('modified_at'),
+                })
+            return models
+        except Exception as e:
+            app_logger.error(f"Error listing Ollama models: {e}")
+            return []
+    
     def get_model_info(self) -> Dict[str, Any]:
         """Get Ollama model information."""
         return {

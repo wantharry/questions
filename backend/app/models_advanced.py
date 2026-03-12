@@ -41,6 +41,27 @@ class IndexType(str, Enum):
     EXERCISE = "exercise"
     SOLUTION = "solution"
     GENERAL = "general"
+    
+    @classmethod
+    def _missing_(cls, value):
+        """Allow any string value for custom indexes."""
+        # Return a pseudo-member for any custom string
+        if isinstance(value, str):
+            # Create a dynamic member (this makes it work like an enum but accept any string)
+            obj = str.__new__(cls, value)
+            obj._name_ = value.upper()
+            obj._value_ = value
+            return obj
+        return None
+    
+    @classmethod
+    def from_string(cls, value: str) -> "IndexType":
+        """Create IndexType from any string (predefined or custom)."""
+        try:
+            return cls(value)
+        except ValueError:
+            # For custom indexes, create a dynamic enum member
+            return cls._missing_(value)
 
 
 class QueryIntent(str, Enum):

@@ -63,13 +63,16 @@ class IngestionRequest(BaseModel):
         description="File patterns to match"
     )
     force_reprocess: bool = Field(default=False, description="Reprocess already indexed files")
+    target_index: Optional[str] = Field(default=None, description="Target custom index name (None = auto-route)")
+    model: Optional[str] = Field(default=None, description="LLM model to use for processing (None = use default)")
     
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "folder_path": "C:/Users/data/physics_books",
             "recursive": True,
             "file_patterns": ["*.pdf", "*.html"],
-            "force_reprocess": False
+            "force_reprocess": False,
+            "target_index": "ncert_physics"
         }
     })
 
@@ -91,12 +94,15 @@ class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Natural language query")
     top_k: int = Field(default=5, ge=1, le=50, description="Number of results to retrieve")
     subject_filter: Optional[Subject] = Field(default=None, description="Filter by subject")
+    index_filter: Optional[List[str]] = Field(default=None, description="Filter by specific indexes (None = search all)")
+    model: Optional[str] = Field(default=None, description="LLM model to use (None = use default from config)")
     
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "query": "Explain Newton's laws of motion",
             "top_k": 5,
-            "subject_filter": "physics"
+            "subject_filter": "physics",
+            "index_filter": ["ncert_physics", "theory"]
         }
     })
 
@@ -127,6 +133,8 @@ class QuestionGenerationRequest(BaseModel):
     question_type: QuestionType = Field(default=QuestionType.MULTIPLE_CHOICE)
     num_questions: int = Field(default=5, ge=1, le=20, description="Number of questions to generate")
     topic: Optional[str] = Field(default=None, description="Specific topic within subject")
+    index_filter: Optional[List[str]] = Field(default=None, description="Filter by specific indexes (None = search all)")
+    model: Optional[str] = Field(default=None, description="LLM model to use (None = use default from config)")
     
     model_config = ConfigDict(json_schema_extra={
         "example": {
@@ -134,7 +142,8 @@ class QuestionGenerationRequest(BaseModel):
             "difficulty": "medium",
             "question_type": "multiple_choice",
             "num_questions": 5,
-            "topic": "thermodynamics"
+            "topic": "thermodynamics",
+            "index_filter": ["ncert_physics"]
         }
     })
 
@@ -205,3 +214,45 @@ class HealthCheck(BaseModel):
     vector_store_type: str
     total_documents: int = 0
     total_chunks: int = 0
+
+
+# Index Management Models
+
+class CreateIndexRequest(BaseModel):
+    """Request to create a custom index."""
+    index_name: str = Field(..., min_length=1, max_length=50, description="Name for the custom index")
+    description: str = Field(default="", max_length=500, description="Optional description")
+    embedding_dimension: Optional[int] = Field(default=None, description="Embedding dimension (defaults to system setting)")
+    
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "index_name": "ncert_physics",
+            "description": "NCERT Physics textbooks",
+            "embedding_dimension": 384
+        }
+    })
+
+
+class IndexInfo(BaseModel):
+    """Information about an index."""
+    name: str
+    description: str = ""
+    document_count: int = 0
+    chunk_count: int = 0
+    dimension: int
+    is_custom: bool
+    created_at: Optional[datetime] = None
+    last_updated: Optional[datetime] = None
+
+
+class ListIndexesResponse(BaseModel):
+    """Response with list of all indexes."""
+    indexes: List[IndexInfo]
+    total_count: int
+
+
+class IndexOperationResponse(BaseModel):
+    """Response for index operations."""
+    success: bool
+    message: str
+    index_info: Optional[IndexInfo] = None

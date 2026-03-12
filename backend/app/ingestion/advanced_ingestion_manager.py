@@ -145,8 +145,18 @@ class AdvancedIngestionManager:
         processed_doc: Dict[str, Any],
         chunks: List[Dict[str, Any]],
         embeddings: Any,
+        target_index: Optional[str] = None,
     ):
-        """Store document metadata and chunks in multiple indexes."""
+        """
+        Store document metadata and chunks in multiple indexes.
+        
+        Args:
+            file_path: Path to the document
+            processed_doc: Processed document data
+            chunks: List of chunks
+            embeddings: Document embeddings
+            target_index: Optional custom index name (overrides content-based routing)
+        """
         db = get_session()
         try:
             # Check if document exists
@@ -254,42 +264,52 @@ class AdvancedIngestionManager:
             # Add to BM25 index
             self.bm25_index.add_documents(bm25_texts, bm25_metadatas, bm25_ids)
             
-            # Add to appropriate FAISS indexes based on content type
-            for content_type, chunks_of_type in chunks_by_type.items():
-                # Determine target index
-                if isinstance(content_type, str):
-                    try:
-                        content_type = ContentType(content_type)
-                    except:
-                        content_type = ContentType.UNKNOWN
-                
-                # Map content type to index type
-                if content_type in [ContentType.THEORY, ContentType.DEFINITION, ContentType.THEOREM]:
-                    index_type = IndexType.THEORY
-                elif content_type in [ContentType.FORMULA, ContentType.DERIVATION]:
-                    index_type = IndexType.FORMULA
-                elif content_type == ContentType.EXERCISE:
-                    index_type = IndexType.EXERCISE
-                elif content_type in [ContentType.WORKED_EXAMPLE, ContentType.SOLUTION]:
-                    index_type = IndexType.SOLUTION
-                else:
-                    index_type = IndexType.GENERAL
-                
-                # Extract texts, metadatas, and embedding indices for this type
-                type_texts = [t for t, m, i in chunks_of_type]
-                type_metadatas = [m for t, m, i in chunks_of_type]
-                type_indices = [i for t, m, i in chunks_of_type]
-                
-                # Get embeddings for this subset
-                type_embeddings = embeddings[type_indices]
-                
-                # Add to specialized index
+            # If target_index is specified, add all chunks to that index
+            if target_index:
+                app_logger.info(f"Adding {len(chunk_texts)} chunks to custom index: {target_index}")
                 self.multi_index.add_documents(
-                    type_texts,
-                    type_embeddings,
-                    type_metadatas,
-                    index_type=index_type
+                    chunk_texts,
+                    embeddings,
+                    chunk_metadatas,
+                    index_type=target_index
                 )
+            else:
+                # Add to appropriate FAISS indexes based on content type
+                for content_type, chunks_of_type in chunks_by_type.items():
+                    # Determine target index
+                    if isinstance(content_type, str):
+                        try:
+                            content_type = ContentType(content_type)
+                        except:
+                            content_type = ContentType.UNKNOWN
+                    
+                    # Map content type to index type
+                    if content_type in [ContentType.THEORY, ContentType.DEFINITION, ContentType.THEOREM]:
+                        index_type = IndexType.THEORY
+                    elif content_type in [ContentType.FORMULA, ContentType.DERIVATION]:
+                        index_type = IndexType.FORMULA
+                    elif content_type == ContentType.EXERCISE:
+                        index_type = IndexType.EXERCISE
+                    elif content_type in [ContentType.WORKED_EXAMPLE, ContentType.SOLUTION]:
+                        index_type = IndexType.SOLUTION
+                    else:
+                        index_type = IndexType.GENERAL
+                    
+                    # Extract texts, metadatas, and embedding indices for this type
+                    type_texts = [t for t, m, i in chunks_of_type]
+                    type_metadatas = [m for t, m, i in chunks_of_type]
+                    type_indices = [i for t, m, i in chunks_of_type]
+                    
+                    # Get embeddings for this subset
+                    type_embeddings = embeddings[type_indices]
+                    
+                    # Add to specialized index
+                    self.multi_index.add_documents(
+                        type_texts,
+                        type_embeddings,
+                        type_metadatas,
+                        index_type=index_type
+                    )
             
             app_logger.info(
                 f"Stored {len(chunks)} chunks for {file_path.name} "
@@ -346,15 +366,26 @@ class AdvancedIngestionManager:
                     # Compute hash for change detection
                     file_hash = self.doc_processor.compute_file_hash(file_path)
                     
-                    # Skip if already processed
+                    # Skip if already processed, unless targeting a specific custom index
+                    # (When targeting a custom index, we want to add even if already in other indexes)
+                    should_skip = False
                     if settings.skip_existing and not request.force_reprocess:
-                        if self._is_document_processed(file_path, file_hash):
-                            app_logger.info(f"Skipping already processed: {file_path.name}")
-                            skipped_count += 1
-                            continue
+                        if not request.target_index:  # Only skip if not targeting a custom index
+                            if self._is_document_processed(file_path, file_hash):
+                                app_logger.info(f"Skipping already processed: {file_path.name}")
+                                skipped_count += 1
+                                should_skip = True
+                    
+                    if should_skip:
+                        continue
+                    
+                    # Log if reprocessing for custom index
+                    if request.target_index and self._is_document_processed(file_path, file_hash):
+                        app_logger.info(f"Reprocessing [{idx+1}/{total_docs}] for custom index '{request.target_index}': {file_path.name}")
+                    else:
+                        app_logger.info(f"Processing [{idx+1}/{total_docs}]: {file_path.name}")
                     
                     # Process document
-                    app_logger.info(f"Processing [{idx+1}/{total_docs}]: {file_path.name}")
                     processed_doc = self.doc_processor.process_document(file_path)
                     
                     # Smart chunking with structure awareness
@@ -382,6 +413,7 @@ class AdvancedIngestionManager:
                         processed_doc,
                         chunks,
                         embeddings,
+                        target_index=request.target_index,
                     )
                     
                     processed_count += 1

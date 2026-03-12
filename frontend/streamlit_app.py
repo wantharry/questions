@@ -106,7 +106,7 @@ def get_api_stats():
         return None
 
 
-def start_ingestion(folder_path: str, recursive: bool, file_patterns: list, force_reprocess: bool):
+def start_ingestion(folder_path: str, recursive: bool, file_patterns: list, force_reprocess: bool, target_index: Optional[str] = None, model: Optional[str] = None):
     """Start document ingestion."""
     try:
         payload = {
@@ -115,6 +115,10 @@ def start_ingestion(folder_path: str, recursive: bool, file_patterns: list, forc
             "file_patterns": file_patterns,
             "force_reprocess": force_reprocess,
         }
+        if target_index:
+            payload["target_index"] = target_index
+        if model:
+            payload["model"] = model
         response = requests.post(f"{API_BASE_URL}/api/ingest", json=payload)
         return response.status_code == 200, response.json()
     except Exception as e:
@@ -132,13 +136,42 @@ def get_ingestion_status():
         return None
 
 
-def query_knowledge_base(query: str, top_k: int = 5):
+def get_available_models():
+    """Get available Ollama models."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/api/llm/models", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('models', []), data.get('default')
+        return [], None
+    except:
+        return [], None
+
+
+def get_available_indexes():
+    """Get available indexes."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/api/indexes", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return [idx['name'] for idx in data.get('indexes', [])]
+        return []
+    except:
+        return []
+
+
+def query_knowledge_base(query: str, top_k: int = 5, model: Optional[str] = None, index_filter: Optional[list] = None):
     """Query the knowledge base."""
     try:
         payload = {
             "query": query,
             "top_k": top_k,
         }
+        if model:
+            payload["model"] = model
+        if index_filter:
+            payload["index_filter"] = index_filter
+        
         response = requests.post(f"{API_BASE_URL}/api/query", json=payload, timeout=60)
         if response.status_code == 200:
             return response.json()
@@ -154,6 +187,8 @@ def generate_questions(
     question_type: str,
     num_questions: int,
     topic: Optional[str] = None,
+    model: Optional[str] = None,
+    index_filter: Optional[list] = None,
 ):
     """Generate questions."""
     try:
@@ -165,6 +200,10 @@ def generate_questions(
         }
         if topic:
             payload["topic"] = topic
+        if model:
+            payload["model"] = model
+        if index_filter:
+            payload["index_filter"] = index_filter
         
         response = requests.post(
             f"{API_BASE_URL}/api/generate-questions",
@@ -253,7 +292,7 @@ with st.sidebar:
         st.warning("Make sure the backend is running:\n```\npython -m app.main\n```")
 
 # Main tabs
-tab1, tab2 = st.tabs(["📁 Knowledge Addition", "🔍 Query & Questions"])
+tab1, tab2, tab3 = st.tabs(["📁 Knowledge Addition", "🔍 Query & Questions", "🏗️ Index Management"])
 
 # ========== TAB 1: Knowledge Addition ==========
 with tab1:
@@ -299,6 +338,64 @@ with tab1:
         if txt: file_patterns.append("*.txt")
         if images: file_patterns.extend(["*.jpg", "*.jpeg", "*.png"])
         
+        # Target index selection
+        st.markdown("---")
+        st.markdown("**Optional Settings**")
+        
+        # Model selection
+        available_models, default_model = get_available_models()
+        if available_models:
+            model_names = [m['name'] for m in available_models]
+            ingestion_model_select = st.selectbox(
+                "🤖 LLM Model (for processing)",
+                options=["Use Default (Recommended)"] + model_names,
+                index=0,
+                help=f"Default: {default_model}. Most ingestion doesn't require LLM, but you can select a specific model if needed.",
+                key="ingestion_model"
+            )
+            ingestion_model = None if ingestion_model_select == "Use Default (Recommended)" else ingestion_model_select
+        else:
+            ingestion_model = None
+        
+        st.markdown("**Target Index** (Optional)")
+        
+        # Fetch available custom indexes
+        try:
+            response = requests.get(f"{API_BASE_URL}/api/indexes", timeout=2)
+            if response.status_code == 200:
+                indexes_data = response.json()
+                all_indexes = [idx['name'] for idx in indexes_data.get('indexes', [])]
+                custom_indexes = [idx['name'] for idx in indexes_data.get('indexes', []) if idx['is_custom']]
+                
+                if custom_indexes:
+                    use_custom_index = st.checkbox(
+                        "Ingest into a specific custom index",
+                        value=False,
+                        help="Check this to select a custom index. Leave unchecked for automatic content-based routing."
+                    )
+                    
+                    target_index = None
+                    if use_custom_index:
+                        target_index = st.selectbox(
+                            "Select target index",
+                            options=custom_indexes,
+                            help="Documents will be added to this index instead of automatic routing"
+                        )
+                        st.caption(f"✅ Documents will be added to: **{target_index}**")
+                    else:
+                        st.caption("📊 Documents will be automatically routed to predefined indexes based on content type")
+                else:
+                    target_index = None
+                    st.caption("📊 Documents will be automatically routed to predefined indexes. Create custom indexes in the 'Index Management' tab.")
+            else:
+                target_index = None
+                st.caption("📊 Using automatic content-based routing")
+        except:
+            target_index = None
+            st.caption("📊 Using automatic content-based routing")
+        
+        st.markdown("---")
+        
         # Start ingestion button
         if st.button("🚀 Start Ingestion", type="primary", use_container_width=True):
             if not folder_path:
@@ -315,7 +412,7 @@ with tab1:
                 else:
                     with st.spinner("Starting ingestion..."):
                         success, result = start_ingestion(
-                            wsl_path, recursive, file_patterns, force_reprocess
+                            wsl_path, recursive, file_patterns, force_reprocess, target_index, ingestion_model
                         )
                         if success:
                             st.success("✅ Ingestion started successfully!")
@@ -378,6 +475,41 @@ with tab2:
     with subtab1:
         st.markdown("Ask questions about your knowledge base")
         
+        # Fetch available models and indexes
+        available_models, default_model = get_available_models()
+        available_indexes = get_available_indexes()
+        
+        # Model and Index Selection
+        col_opt1, col_opt2 = st.columns(2)
+        
+        with col_opt1:
+            if available_models:
+                model_names = [m['name'] for m in available_models]
+                default_idx = model_names.index(default_model) if default_model in model_names else 0
+                selected_model = st.selectbox(
+                    "🤖 LLM Model",
+                    options=["Use Default"] + model_names,
+                    index=0,
+                    help=f"Default: {default_model}"
+                )
+                query_model = None if selected_model == "Use Default" else selected_model
+            else:
+                query_model = None
+                st.caption("🤖 Using default model")
+        
+        with col_opt2:
+            if available_indexes:
+                selected_indexes = st.multiselect(
+                    "📑 Search Indexes",
+                    options=available_indexes,
+                    default=None,
+                    help="Leave empty to search all indexes"
+                )
+                query_indexes = selected_indexes if selected_indexes else None
+            else:
+                query_indexes = None
+                st.caption("📑 Searching all indexes")
+        
         query_text = st.text_area(
             "Enter your question:",
             placeholder="What are Newton's laws of motion?",
@@ -392,7 +524,7 @@ with tab2:
         
         if query_button and query_text:
             with st.spinner("Searching knowledge base..."):
-                result = query_knowledge_base(query_text, top_k)
+                result = query_knowledge_base(query_text, top_k, model=query_model, index_filter=query_indexes)
                 
                 if result:
                     st.markdown("### Answer")
@@ -436,6 +568,43 @@ with tab2:
     with subtab2:
         st.markdown("Generate practice questions from your knowledge base")
         
+        # Fetch available models and indexes
+        available_models, default_model = get_available_models()
+        available_indexes = get_available_indexes()
+        
+        # Model and Index Selection in expander
+        with st.expander("⚙️ Advanced Options (Model & Index Selection)", expanded=False):
+            col_adv1, col_adv2 = st.columns(2)
+            
+            with col_adv1:
+                if available_models:
+                    model_names = [m['name'] for m in available_models]
+                    questions_model_select = st.selectbox(
+                        "🤖 LLM Model",
+                        options=["Use Default"] + model_names,
+                        index=0,
+                        help=f"Default: {default_model}",
+                        key="questions_model"
+                    )
+                    questions_model = None if questions_model_select == "Use Default" else questions_model_select
+                else:
+                    questions_model = None
+                    st.caption("🤖 Using default model")
+            
+            with col_adv2:
+                if available_indexes:
+                    questions_indexes = st.multiselect(
+                        "📑 Source Indexes",
+                        options=available_indexes,
+                        default=None,
+                        help="Leave empty to use all indexes for context",
+                        key="questions_indexes"
+                    )
+                    questions_index_filter = questions_indexes if questions_indexes else None
+                else:
+                    questions_index_filter = None
+                    st.caption("📑 Using all indexes")
+        
         col1, col2 = st.columns(2)
         
         with col1:
@@ -466,7 +635,10 @@ with tab2:
         if st.button("✨ Generate Questions", type="primary", use_container_width=True):
             with st.spinner(f"Generating {num_questions} {difficulty} questions..."):
                 result = generate_questions(
-                    subject, difficulty, question_type, num_questions, topic or None
+                    subject, difficulty, question_type, num_questions, 
+                    topic or None, 
+                    model=questions_model, 
+                    index_filter=questions_index_filter
                 )
                 
                 if result and result.get('questions'):
@@ -504,6 +676,182 @@ with tab2:
                         st.text(result.get('context_used', 'No context available'))
                 else:
                     st.error("Failed to generate questions. Check if documents are loaded.")
+
+# ========== TAB 3: Index Management ==========
+with tab3:
+    st.header("🏗️ Manage Vector Indexes")
+    st.markdown("Create and manage custom indexes for organizing your documents by topic, source, or any criteria.")
+    
+    # Create two columns
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.subheader("📋 Existing Indexes")
+        
+        # Refresh button
+        if st.button("🔄 Refresh Index List"):
+            st.rerun()
+        
+        # Fetch and display indexes
+        try:
+            response = requests.get(f"{API_BASE_URL}/api/indexes", timeout=5)
+            if response.status_code == 200:
+                indexes_data = response.json()
+                indexes = indexes_data.get('indexes', [])
+                
+                if indexes:
+                    # Create a DataFrame for better display
+                    df_data = []
+                    for idx in indexes:
+                        df_data.append({
+                            'Name': idx['name'],
+                            'Documents': idx['document_count'],
+                            'Dimension': idx['dimension'],
+                            'Type': '🔒 Predefined' if not idx['is_custom'] else '✨ Custom'
+                        })
+                    
+                    df = pd.DataFrame(df_data)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    
+                    st.caption(f"**Total Indexes:** {len(indexes)} ({sum(1 for i in indexes if i['is_custom'])} custom)")
+                    
+                    # Delete custom index section
+                    st.markdown("---")
+                    st.subheader("🗑️ Delete Custom Index")
+                    
+                    custom_indexes = [idx['name'] for idx in indexes if idx['is_custom']]
+                    
+                    if custom_indexes:
+                        index_to_delete = st.selectbox(
+                            "Select index to delete",
+                            options=custom_indexes,
+                            help="⚠️ Only custom indexes can be deleted. Predefined indexes are protected."
+                        )
+                        
+                        if st.button("🗑️ Delete Index", type="secondary"):
+                            with st.spinner(f"Deleting index '{index_to_delete}'..."):
+                                try:
+                                    del_response = requests.delete(
+                                        f"{API_BASE_URL}/api/indexes/{index_to_delete}",
+                                        timeout=10
+                                    )
+                                    if del_response.status_code == 200:
+                                        st.success(f"✅ Index '{index_to_delete}' deleted successfully!")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        error_msg = del_response.json().get('detail', 'Unknown error')
+                                        st.error(f"❌ Failed to delete index: {error_msg}")
+                                except Exception as e:
+                                    st.error(f"❌ Error: {str(e)}")
+                    else:
+                        st.info("No custom indexes to delete. Predefined indexes cannot be deleted.")
+                
+                else:
+                    st.warning("No indexes found")
+            else:
+                st.error(f"Failed to fetch indexes: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            st.error(f"❌ Cannot connect to API: {str(e)}")
+            st.info("Make sure the backend is running on port 8601")
+    
+    with col2:
+        st.subheader("➕ Create New Index")
+        
+        with st.form("create_index_form"):
+            st.markdown("Create a custom index for organizing specific documents.")
+            
+            index_name = st.text_input(
+                "Index Name",
+                placeholder="e.g., jee_physics, ncert_chemistry",
+                help="Use lowercase letters, numbers, underscores, and hyphens only"
+            )
+            
+            description = st.text_area(
+                "Description (Optional)",
+                placeholder="Brief description of what this index will contain...",
+                help="This helps you remember the purpose of this index"
+            )
+            
+            # Advanced options
+            with st.expander("⚙️ Advanced Options"):
+                embedding_dim = st.number_input(
+                    "Embedding Dimension",
+                    min_value=128,
+                    max_value=1536,
+                    value=384,
+                    step=128,
+                    help="Default: 384 (matches sentence-transformers/all-MiniLM-L6-v2). Change only if using a different embedding model."
+                )
+            
+            submit_button = st.form_submit_button("✨ Create Index", type="primary")
+            
+            if submit_button:
+                if not index_name:
+                    st.error("⚠️ Index name is required!")
+                elif not re.match(r'^[a-z0-9_-]+$', index_name):
+                    st.error("⚠️ Index name must contain only lowercase letters, numbers, underscores, and hyphens")
+                else:
+                    with st.spinner(f"Creating index '{index_name}'..."):
+                        try:
+                            payload = {
+                                "index_name": index_name,
+                                "description": description,
+                                "embedding_dimension": embedding_dim
+                            }
+                            
+                            response = requests.post(
+                                f"{API_BASE_URL}/api/indexes",
+                                json=payload,
+                                timeout=10
+                            )
+                            
+                            if response.status_code == 200:
+                                result = response.json()
+                                st.success(f"✅ Index '{index_name}' created successfully!")
+                                
+                                with st.expander("📊 Index Details"):
+                                    st.json(result.get('index_info', {}))
+                                
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                error_data = response.json()
+                                error_msg = error_data.get('detail', 'Unknown error')
+                                st.error(f"❌ Failed to create index: {error_msg}")
+                        
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"❌ API Error: {str(e)}")
+                        except Exception as e:
+                            st.error(f"❌ Unexpected error: {str(e)}")
+    
+    # Usage guide
+    st.markdown("---")
+    st.markdown("""
+    ### 📖 How to Use Custom Indexes
+    
+    1. **Create an Index**: Use the form above to create a new index (e.g., `jee_physics`)
+    2. **Ingest Documents**: In the "Knowledge Addition" tab, select your new index from the dropdown when ingesting documents
+    3. **Search**: When querying, you can search across all indexes or specific ones
+    
+    ### 💡 Use Cases
+    
+    - **By Source**: Separate indexes for different textbooks or courses (e.g., `ncert`, `jee_material`)
+    - **By Topic**: Physics, Chemistry, Math as separate indexes
+    - **By Level**: Basic, Intermediate, Advanced content
+    - **By Exam**: JEE, NEET, Board exam preparation materials
+    
+    ### 🔒 Predefined Indexes
+    
+    These indexes are always available and cannot be deleted:
+    - **theory**: Explanations, definitions, theorems
+    - **formula**: Equations, derivations, formulas
+    - **exercise**: Problems, practice questions
+    - **solution**: Worked examples, solutions
+    - **general**: Mixed or unclassified content
+    
+    Documents are automatically routed to these indexes based on content classification.
+    """)
 
 # Footer
 st.markdown("---")

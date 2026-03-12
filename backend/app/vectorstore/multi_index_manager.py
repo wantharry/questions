@@ -4,6 +4,8 @@ Multiple specialized vector indexes for different content types.
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import numpy as np
+import json
+from datetime import datetime
 from app.models_advanced import ContentType, IndexType
 from app.vectorstore.faiss_manager import FAISSVectorStore
 from app.config import settings
@@ -27,9 +29,13 @@ class MultiIndexManager:
         self.store_dir = Path(store_dir or settings.vector_store_dir)
         self.store_dir.mkdir(parents=True, exist_ok=True)
         
+        # Path to custom indexes config
+        self.custom_indexes_file = self.store_dir.parent / "custom_indexes.json"
+        
         # Create specialized indexes
         self.indexes = {}
         
+        # Default index configs (predefined)
         index_configs = {
             IndexType.THEORY: "theory_index",
             IndexType.FORMULA: "formula_index",
@@ -47,14 +53,205 @@ class MultiIndexManager:
                 store_dir=index_dir
             )
         
+        # Load custom indexes from config file
+        self._load_custom_indexes()
+        
         app_logger.info(f"Initialized {len(self.indexes)} specialized indexes")
+    
+    def _load_custom_indexes(self):
+        """Load custom indexes from JSON config file."""
+        if not self.custom_indexes_file.exists():
+            app_logger.info("No custom indexes config found")
+            return
+        
+        try:
+            with open(self.custom_indexes_file, 'r') as f:
+                custom_configs = json.load(f)
+            
+            for index_name, config in custom_configs.items():
+                # Skip if already exists (predefined indexes)
+                index_type = IndexType.from_string(index_name)
+                if index_type in self.indexes:
+                    app_logger.info(f"Index {index_name} already loaded (predefined)")
+                    continue
+                
+                # Create custom index
+                index_dir = self.store_dir / f"{index_name}_index"
+                index_dir.mkdir(exist_ok=True)
+                
+                # Get embedding dimension from config or use default
+                dimension = config.get('embedding_dimension', settings.embedding_dimension)
+                
+                self.indexes[index_type] = FAISSVectorStore(
+                    dimension=dimension,
+                    store_dir=index_dir
+                )
+                
+                app_logger.info(f"Loaded custom index: {index_name}")
+        
+        except Exception as e:
+            app_logger.error(f"Error loading custom indexes: {e}")
+    
+    def create_custom_index(
+        self,
+        index_name: str,
+        description: str = "",
+        embedding_dimension: int = None
+    ) -> Dict[str, Any]:
+        """
+        Create a new custom index.
+        
+        Args:
+            index_name: Name for the custom index
+            description: Optional description
+            embedding_dimension: Embedding dimension (default: from settings)
+        
+        Returns:
+            Dictionary with index info
+        """
+        # Validate index name
+        if not index_name or not index_name.replace('_', '').replace('-', '').isalnum():
+            raise ValueError("Index name must be alphanumeric (underscores and hyphens allowed)")
+        
+        index_name = index_name.lower()
+        index_type = IndexType.from_string(index_name)
+        
+        # Check if already exists
+        if index_type in self.indexes:
+            raise ValueError(f"Index {index_name} already exists")
+        
+        # Create index directory
+        index_dir = self.store_dir / f"{index_name}_index"
+        index_dir.mkdir(exist_ok=True)
+        
+        # Use provided dimension or default
+        dimension = embedding_dimension or settings.embedding_dimension
+        
+        # Create FAISS index
+        self.indexes[index_type] = FAISSVectorStore(
+            dimension=dimension,
+            store_dir=index_dir
+        )
+        
+        # Save to custom indexes config
+        config = {
+            "index_name": index_name,
+            "description": description,
+            "embedding_dimension": dimension,
+            "created_at": datetime.now().isoformat(),
+            "last_updated": datetime.now().isoformat(),
+            "document_count": 0,
+            "chunk_count": 0
+        }
+        
+        self._save_custom_index_config(index_name, config)
+        
+        app_logger.info(f"Created custom index: {index_name}")
+        
+        return config
+    
+    def delete_custom_index(self, index_name: str) -> bool:
+        """
+        Delete a custom index (predefined indexes cannot be deleted).
+        
+        Args:
+            index_name: Name of the index to delete
+        
+        Returns:
+            True if deleted, False if not found or is predefined
+        """
+        index_name = index_name.lower()
+        index_type = IndexType.from_string(index_name)
+        
+        # Prevent deletion of predefined indexes
+        predefined = [IndexType.THEORY, IndexType.FORMULA, IndexType.EXERCISE, 
+                     IndexType.SOLUTION, IndexType.GENERAL]
+        
+        if index_type in predefined:
+            raise ValueError(f"Cannot delete predefined index: {index_name}")
+        
+        if index_type not in self.indexes:
+            return False
+        
+        # Remove from memory
+        del self.indexes[index_type]
+        
+        # Remove from config file
+        self._remove_custom_index_config(index_name)
+        
+        # Optionally delete files (commented out for safety)
+        # index_dir = self.store_dir / f"{index_name}_index"
+        # if index_dir.exists():
+        #     import shutil
+        #     shutil.rmtree(index_dir)
+        
+        app_logger.info(f"Deleted custom index: {index_name}")
+        
+        return True
+    
+    def list_all_indexes(self) -> Dict[str, Dict[str, Any]]:
+        """List all indexes (predefined and custom) with their stats."""
+        all_indexes = {}
+        
+        for index_type, index in self.indexes.items():
+            stats = index.get_stats()
+            all_indexes[index_type.value] = {
+                'name': index_type.value,
+                'document_count': stats['total_vectors'],
+                'dimension': stats['dimension'],
+                'is_custom': self._is_custom_index(index_type)
+            }
+        
+        return all_indexes
+    
+    def _is_custom_index(self, index_type: IndexType) -> bool:
+        """Check if an index is custom (not predefined)."""
+        predefined = [IndexType.THEORY, IndexType.FORMULA, IndexType.EXERCISE, 
+                     IndexType.SOLUTION, IndexType.GENERAL]
+        return index_type not in predefined
+    
+    def _save_custom_index_config(self, index_name: str, config: Dict[str, Any]):
+        """Save custom index configuration to JSON file."""
+        # Load existing configs
+        configs = {}
+        if self.custom_indexes_file.exists():
+            try:
+                with open(self.custom_indexes_file, 'r') as f:
+                    configs = json.load(f)
+            except:
+                pass
+        
+        # Update with new config
+        configs[index_name] = config
+        
+        # Save back
+        with open(self.custom_indexes_file, 'w') as f:
+            json.dump(configs, f, indent=2)
+    
+    def _remove_custom_index_config(self, index_name: str):
+        """Remove custom index from configuration file."""
+        if not self.custom_indexes_file.exists():
+            return
+        
+        try:
+            with open(self.custom_indexes_file, 'r') as f:
+                configs = json.load(f)
+            
+            if index_name in configs:
+                del configs[index_name]
+            
+            with open(self.custom_indexes_file, 'w') as f:
+                json.dump(configs, f, indent=2)
+        
+        except Exception as e:
+            app_logger.error(f"Error removing index config: {e}")
     
     def add_documents(
         self,
         texts: List[str],
         embeddings: np.ndarray,
         metadatas: List[Dict[str, Any]],
-        index_type: IndexType = IndexType.GENERAL
+        index_type: Optional[Any] = None
     ):
         """
         Add documents to appropriate index.
@@ -63,16 +260,24 @@ class MultiIndexManager:
             texts: Document texts
             embeddings: Document embeddings (already computed)
             metadatas: Document metadata (should include content_type)
-            index_type: Which index to use (or route based on metadata)
+            index_type: Which index to use (IndexType, string, or None for auto-routing)
         """
-        # Route to appropriate index based on content_type if available
-        if index_type == IndexType.GENERAL:
+        # Convert string to IndexType if needed
+        if isinstance(index_type, str):
+            index_type = IndexType.from_string(index_type)
+        
+        # Route to appropriate index based on content_type if not specified
+        if index_type is None or index_type == IndexType.GENERAL:
             # Try to determine from metadata
             for metadata in metadatas:
                 content_type = metadata.get('content_type')
                 if content_type:
                     index_type = self._map_content_to_index(content_type)
                     break
+            
+            # Default to GENERAL if still not determined
+            if index_type is None:
+                index_type = IndexType.GENERAL
         
         # Add to specified index
         if index_type in self.indexes:
@@ -87,7 +292,7 @@ class MultiIndexManager:
         self,
         query_embedding: np.ndarray,
         top_k: int = 10,
-        index_types: List[IndexType] = None,
+        index_types: List[Any] = None,
         filter_metadata: Dict[str, Any] = None
     ) -> List[Dict[str, Any]]:
         """
@@ -96,7 +301,7 @@ class MultiIndexManager:
         Args:
             query_embedding: Query vector
             top_k: Number of results to return per index
-            index_types: Which indexes to search (None = all)
+            index_types: Which indexes to search (None = all, can be IndexType or string)
             filter_metadata: Optional metadata filters
         
         Returns:
@@ -104,6 +309,12 @@ class MultiIndexManager:
         """
         if index_types is None:
             index_types = list(self.indexes.keys())
+        else:
+            # Convert strings to IndexType
+            index_types = [
+                IndexType.from_string(it) if isinstance(it, str) else it
+                for it in index_types
+            ]
         
         all_results = []
         
@@ -139,11 +350,15 @@ class MultiIndexManager:
     def search_specific_index(
         self,
         query_embedding: np.ndarray,
-        index_type: IndexType,
+        index_type: Any,
         top_k: int = 10,
         filter_metadata: Dict[str, Any] = None
     ) -> List[Dict[str, Any]]:
         """Search a specific index."""
+        # Convert string to IndexType if needed
+        if isinstance(index_type, str):
+            index_type = IndexType.from_string(index_type)
+        
         if index_type not in self.indexes:
             app_logger.warning(f"Index type {index_type} not found")
             return []

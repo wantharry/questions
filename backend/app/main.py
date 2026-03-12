@@ -2,6 +2,7 @@
 FastAPI main application with all endpoints.
 """
 import time
+from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +17,10 @@ from app.models import (
     QueryResponse,
     QuestionGenerationRequest,
     QuestionGenerationResponse,
+    CreateIndexRequest,
+    IndexInfo,
+    ListIndexesResponse,
+    IndexOperationResponse,
 )
 from app.models_advanced import HybridSearchRequest
 from app.ingestion.advanced_ingestion_manager import AdvancedIngestionManager
@@ -202,12 +207,19 @@ async def query_knowledge_base(request: QueryRequest):
         # Generate query embedding
         query_embedding = current_embedder.embed_text(request.query)
         
+        # Convert index_filter to IndexType if provided
+        specific_indexes = None
+        if request.index_filter:
+            from app.models_advanced import IndexType
+            specific_indexes = [IndexType.from_string(idx) for idx in request.index_filter]
+        
         # Hybrid retrieval with automatic routing
         results = current_retriever.search(
             query=request.query,
             query_embedding=query_embedding,
             top_k=request.top_k,
             use_reranking=True,
+            specific_indexes=specific_indexes,
         )
         
         if not results:
@@ -235,14 +247,30 @@ async def query_knowledge_base(request: QueryRequest):
         
         context = "\n\n".join(context_parts)
         
-        # Generate answer
-        llm = LLMManager.get_llm()
+        # Generate answer using selected model or default
+        if request.model:
+            # Create LLM with specific model
+            from app.llm.ollama_llm import OllamaLLM
+            llm = OllamaLLM(
+                model_name=request.model,
+                base_url=settings.llm_base_url,
+                temperature=settings.llm_temperature,
+                max_tokens=settings.llm_max_tokens,
+                timeout=settings.llm_timeout,
+            )
+        else:
+            llm = LLMManager.get_llm()
+        
         system_prompt, user_prompt = PromptTemplates.get_answer_prompt(context, request.query)
         
         response = await llm.generate(
             prompt=user_prompt,
             system_prompt=system_prompt,
         )
+        
+        # Clean up temporary LLM if created
+        if request.model:
+            await llm.close()
         
         processing_time = time.time() - start_time
         
@@ -271,7 +299,20 @@ async def generate_questions(request: QuestionGenerationRequest):
     try:
         # Lazy-load question generator
         current_generator = get_question_generator()
-        questions = await current_generator.generate_questions(request)
+        
+        # Create LLM with specific model if provided
+        custom_llm = None
+        if request.model:
+            from app.llm.ollama_llm import OllamaLLM
+            custom_llm = OllamaLLM(
+                model_name=request.model,
+                base_url=settings.llm_base_url,
+                temperature=settings.llm_temperature,
+                max_tokens=settings.llm_max_tokens,
+                timeout=settings.llm_timeout,
+            )
+        
+        questions = await current_generator.generate_questions(request, llm=custom_llm)
         
         # Get the context that was used
         if request.context:
@@ -283,6 +324,10 @@ async def generate_questions(request: QuestionGenerationRequest):
                 context_used += f" - Topic: {request.topic}"
         
         processing_time = time.time() - start_time
+        
+        # Clean up temporary LLM if created
+        if custom_llm:
+            await custom_llm.close()
         
         return QuestionGenerationResponse(
             questions=questions,
@@ -350,6 +395,154 @@ async def check_llm_health():
         )
     
     return {"status": "available"}
+
+
+@app.get("/api/llm/models")
+async def list_ollama_models():
+    """List available models from Ollama."""
+    if settings.llm_provider != "ollama":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model listing only supported for Ollama provider. Current provider: {settings.llm_provider}"
+        )
+    
+    try:
+        from app.llm.ollama_llm import OllamaLLM
+        temp_llm = OllamaLLM(
+            model_name=settings.llm_model,
+            base_url=settings.llm_base_url,
+        )
+        models = await temp_llm.list_models()
+        await temp_llm.close()
+        return {"models": models, "default": settings.llm_model}
+    except Exception as e:
+        app_logger.error(f"Error listing Ollama models: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Index Management Endpoints
+
+@app.post("/api/indexes", response_model=IndexOperationResponse)
+async def create_custom_index(request: CreateIndexRequest):
+    """
+    Create a new custom index.
+    
+    Custom indexes allow you to organize documents by topic, source, or any other criteria.
+    Documents can be ingested directly into custom indexes.
+    """
+    try:
+        # Create the custom index
+        config = ingestion_manager.multi_index.create_custom_index(
+            index_name=request.index_name,
+            description=request.description,
+            embedding_dimension=request.embedding_dimension
+        )
+        
+        index_info = IndexInfo(
+            name=config['index_name'],
+            description=config.get('description', ''),
+            document_count=config.get('document_count', 0),
+            chunk_count=config.get('chunk_count', 0),
+            dimension=config['embedding_dimension'],
+            is_custom=True,
+            created_at=datetime.fromisoformat(config['created_at']) if 'created_at' in config else None,
+            last_updated=datetime.fromisoformat(config['last_updated']) if 'last_updated' in config else None
+        )
+        
+        return IndexOperationResponse(
+            success=True,
+            message=f"Custom index '{request.index_name}' created successfully",
+            index_info=index_info
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        app_logger.error(f"Error creating custom index: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create index: {str(e)}")
+
+
+@app.get("/api/indexes", response_model=ListIndexesResponse)
+async def list_indexes():
+    """
+    List all indexes (predefined and custom).
+    
+    Returns information about all available indexes including their document counts.
+    """
+    try:
+        all_indexes = ingestion_manager.multi_index.list_all_indexes()
+        
+        index_list = []
+        for name, stats in all_indexes.items():
+            index_list.append(IndexInfo(
+                name=name,
+                description="",  # Could be fetched from config if needed
+                document_count=stats['document_count'],
+                chunk_count=stats['document_count'],  # Same as document_count for now
+                dimension=stats['dimension'],
+                is_custom=stats['is_custom']
+            ))
+        
+        return ListIndexesResponse(
+            indexes=index_list,
+            total_count=len(index_list)
+        )
+    
+    except Exception as e:
+        app_logger.error(f"Error listing indexes: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list indexes: {str(e)}")
+
+
+@app.delete("/api/indexes/{index_name}", response_model=IndexOperationResponse)
+async def delete_custom_index(index_name: str):
+    """
+    Delete a custom index.
+    
+    Note: Predefined indexes (theory, formula, exercise, solution, general) cannot be deleted.
+    """
+    try:
+        success = ingestion_manager.multi_index.delete_custom_index(index_name)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Index '{index_name}' not found")
+        
+        return IndexOperationResponse(
+            success=True,
+            message=f"Custom index '{index_name}' deleted successfully"
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        app_logger.error(f"Error deleting custom index: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete index: {str(e)}")
+
+
+@app.get("/api/indexes/{index_name}", response_model=IndexInfo)
+async def get_index_info(index_name: str):
+    """Get detailed information about a specific index."""
+    try:
+        all_indexes = ingestion_manager.multi_index.list_all_indexes()
+        
+        if index_name not in all_indexes:
+            raise HTTPException(status_code=404, detail=f"Index '{index_name}' not found")
+        
+        stats = all_indexes[index_name]
+        
+        return IndexInfo(
+            name=index_name,
+            description="",
+            document_count=stats['document_count'],
+            chunk_count=stats['document_count'],
+            dimension=stats['dimension'],
+            is_custom=stats['is_custom']
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        app_logger.error(f"Error getting index info: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get index info: {str(e)}")
 
 
 # Error handlers
