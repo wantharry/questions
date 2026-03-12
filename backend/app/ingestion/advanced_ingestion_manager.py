@@ -152,6 +152,7 @@ class AdvancedIngestionManager:
         processed_doc: Dict[str, Any],
         chunks: List[Dict[str, Any]],
         embeddings: Any,
+        use_classification: bool = False,
     ):
         """Store document metadata and chunks in multiple indexes."""
         db = get_session()
@@ -199,20 +200,27 @@ class AdvancedIngestionManager:
                     f"{file_path}{idx}{chunk_data['text']}".encode()
                 ).hexdigest()
                 
-                # Get content type (from smart chunker or classifier)
-                content_type = chunk_data.get('content_type')
-                if not content_type:
-                    content_type = self.classifier.classify_content(
-                        chunk_data['text'],
-                        chunk_data.get('metadata', {})
-                    )
-                
-                # Detect difficulty
-                difficulty = self.classifier.detect_difficulty(chunk_data['text'])
-                
-                # Extract keywords and formulas
-                keywords = self.classifier.extract_keywords(chunk_data['text'])
-                formulas = self.classifier.extract_formulas(chunk_data['text'])
+                # Get content type only if classification is enabled
+                if use_classification:
+                    content_type = chunk_data.get('content_type')
+                    if not content_type:
+                        content_type = self.classifier.classify_content(
+                            chunk_data['text'],
+                            chunk_data.get('metadata', {})
+                        )
+                    
+                    # Detect difficulty
+                    difficulty = self.classifier.detect_difficulty(chunk_data['text'])
+                    
+                    # Extract keywords and formulas
+                    keywords = self.classifier.extract_keywords(chunk_data['text'])
+                    formulas = self.classifier.extract_formulas(chunk_data['text'])
+                else:
+                    # Unified mode: no classification
+                    content_type = ContentType.GENERAL
+                    difficulty = None
+                    keywords = []
+                    formulas = []
                 
                 # Create enhanced metadata
                 enhanced_metadata = {
@@ -224,7 +232,7 @@ class AdvancedIngestionManager:
                     'page_number': chunk_data.get('metadata', {}).get('page_number'),
                     'content': chunk_data['text'],
                     'content_type': content_type.value if hasattr(content_type, 'value') else str(content_type),
-                    'difficulty': difficulty.value if hasattr(difficulty, 'value') else str(difficulty),
+                    'difficulty': difficulty.value if hasattr(difficulty, 'value') else str(difficulty) if difficulty else 'unknown',
                     'keywords': keywords,
                     'formulas': formulas,
                     'is_complete': chunk_data.get('metadata', {}).get('is_complete', True),
@@ -261,47 +269,61 @@ class AdvancedIngestionManager:
             # Add to BM25 index
             self.bm25_index.add_documents(bm25_texts, bm25_metadatas, bm25_ids)
             
-            # Add to appropriate FAISS indexes based on content type
-            for content_type, chunks_of_type in chunks_by_type.items():
-                # Determine target index
-                if isinstance(content_type, str):
-                    try:
-                        content_type = ContentType(content_type)
-                    except:
-                        content_type = ContentType.UNKNOWN
+            # Add to FAISS indexes
+            if use_classification:
+                # Classification mode: route to specialized indexes based on content type
+                for content_type, chunks_of_type in chunks_by_type.items():
+                    # Determine target index
+                    if isinstance(content_type, str):
+                        try:
+                            content_type = ContentType(content_type)
+                        except:
+                            content_type = ContentType.UNKNOWN
+                    
+                    # Map content type to index type
+                    if content_type in [ContentType.THEORY, ContentType.DEFINITION, ContentType.THEOREM]:
+                        index_type = IndexType.THEORY
+                    elif content_type in [ContentType.FORMULA, ContentType.DERIVATION]:
+                        index_type = IndexType.FORMULA
+                    elif content_type == ContentType.EXERCISE:
+                        index_type = IndexType.EXERCISE
+                    elif content_type in [ContentType.WORKED_EXAMPLE, ContentType.SOLUTION]:
+                        index_type = IndexType.SOLUTION
+                    else:
+                        index_type = IndexType.GENERAL
+                    
+                    # Extract texts, metadatas, and embedding indices for this type
+                    type_texts = [t for t, m, i in chunks_of_type]
+                    type_metadatas = [m for t, m, i in chunks_of_type]
+                    type_indices = [i for t, m, i in chunks_of_type]
+                    
+                    # Get embeddings for this subset
+                    type_embeddings = embeddings[type_indices]
+                    
+                    # Add to specialized index
+                    self.multi_index.add_documents(
+                        type_texts,
+                        type_embeddings,
+                        type_metadatas,
+                        index_type=index_type
+                    )
                 
-                # Map content type to index type
-                if content_type in [ContentType.THEORY, ContentType.DEFINITION, ContentType.THEOREM]:
-                    index_type = IndexType.THEORY
-                elif content_type in [ContentType.FORMULA, ContentType.DERIVATION]:
-                    index_type = IndexType.FORMULA
-                elif content_type == ContentType.EXERCISE:
-                    index_type = IndexType.EXERCISE
-                elif content_type in [ContentType.WORKED_EXAMPLE, ContentType.SOLUTION]:
-                    index_type = IndexType.SOLUTION
-                else:
-                    index_type = IndexType.GENERAL
-                
-                # Extract texts, metadatas, and embedding indices for this type
-                type_texts = [t for t, m, i in chunks_of_type]
-                type_metadatas = [m for t, m, i in chunks_of_type]
-                type_indices = [i for t, m, i in chunks_of_type]
-                
-                # Get embeddings for this subset
-                type_embeddings = embeddings[type_indices]
-                
-                # Add to specialized index
-                self.multi_index.add_documents(
-                    type_texts,
-                    type_embeddings,
-                    type_metadatas,
-                    index_type=index_type
+                app_logger.info(
+                    f"Stored {len(chunks)} chunks for {file_path.name} "
+                    f"across {len(chunks_by_type)} content types"
                 )
-            
-            app_logger.info(
-                f"Stored {len(chunks)} chunks for {file_path.name} "
-                f"across {len(chunks_by_type)} content types"
-            )
+            else:
+                # Unified mode: store everything in GENERAL index without classification
+                self.multi_index.add_documents(
+                    chunk_texts,
+                    embeddings,
+                    chunk_metadatas,
+                    index_type=IndexType.GENERAL
+                )
+                
+                app_logger.info(
+                    f"Stored {len(chunks)} chunks for {file_path.name} in unified GENERAL index (no classification)"
+                )
             
         except Exception as e:
             db.rollback()
@@ -374,13 +396,18 @@ class AdvancedIngestionManager:
                     processed_doc = self.doc_processor.process_document(file_path)
                     
                     # Smart chunking with structure awareness
+                    chunk_metadata = {
+                        'file_path': str(file_path),
+                        'file_name': file_path.name,
+                        **processed_doc['metadata']
+                    }
+                    # Tag with custom index name if specified
+                    if request.custom_index_name:
+                        chunk_metadata['custom_index_name'] = request.custom_index_name
+                    
                     chunks = self.smart_chunker.chunk_document(
                         processed_doc['content'],
-                        metadata={
-                            'file_path': str(file_path),
-                            'file_name': file_path.name,
-                            **processed_doc['metadata']
-                        }
+                        metadata=chunk_metadata
                     )
                     
                     if not chunks:
@@ -398,6 +425,7 @@ class AdvancedIngestionManager:
                         processed_doc,
                         chunks,
                         embeddings,
+                        use_classification=request.use_classification,
                     )
                     
                     processed_count += 1

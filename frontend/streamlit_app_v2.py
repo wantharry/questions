@@ -306,6 +306,7 @@ def generate_questions(
     num_questions: int,
     topic: Optional[str] = None,
     index_name: Optional[str] = None,
+    llm_model: Optional[str] = None,
 ):
     """Generate questions."""
     try:
@@ -319,6 +320,8 @@ def generate_questions(
             payload["topic"] = topic
         if index_name:
             payload["index_name"] = index_name
+        if llm_model:
+            payload["settings"] = {"retrieval_llm": llm_model}
         
         response = requests.post(
             f"{API_BASE_URL}/api/generate-questions",
@@ -340,6 +343,7 @@ INDEX_PRESETS = {
     "📚 Academic": {
         "label": "Textbooks, lecture notes, course materials",
         "retrieval_mode": "hybrid",
+        "use_classification": False,
         "chunk_size": 800,
         "chunk_overlap": 100,
         "high_recall_chunking": True,
@@ -354,6 +358,7 @@ INDEX_PRESETS = {
     "📄 General": {
         "label": "PDFs, reports, mixed documents",
         "retrieval_mode": "hybrid",
+        "use_classification": False,
         "chunk_size": 512,
         "chunk_overlap": 64,
         "high_recall_chunking": True,
@@ -368,6 +373,7 @@ INDEX_PRESETS = {
     "🔬 Research": {
         "label": "Academic papers, articles, technical reports",
         "retrieval_mode": "hybrid",
+        "use_classification": False,
         "chunk_size": 1000,
         "chunk_overlap": 150,
         "high_recall_chunking": True,
@@ -382,6 +388,7 @@ INDEX_PRESETS = {
     "⚡ Quick": {
         "label": "Fast indexing for quick prototyping",
         "retrieval_mode": "vector",
+        "use_classification": False,
         "chunk_size": 256,
         "chunk_overlap": 32,
         "high_recall_chunking": False,
@@ -403,6 +410,7 @@ def _init_ci_state():
     defaults = {
         "ci_preset":             _DEFAULT_PRESET,
         "ci_retrieval_mode":     preset["retrieval_mode"],
+        "ci_use_classification": preset["use_classification"],
         "ci_chunk_size":         preset["chunk_size"],
         "ci_chunk_overlap":      preset["chunk_overlap"],
         "ci_high_recall":        preset["high_recall_chunking"],
@@ -424,7 +432,7 @@ st.set_page_config(
     page_title="RAG Question Generator - Multi-Index",
     page_icon="📚",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Custom CSS
@@ -537,29 +545,17 @@ st.markdown("""
 _init_ci_state()
 
 # Title and header
-st.title("📚 RAG Question Generator")
-st.caption("Create and manage multiple knowledge bases · Powered by hybrid retrieval")
-
-# Sidebar - System Status
-with st.sidebar:
-    st.header("System Status")
-    
+_title_col, _status_col = st.columns([5, 1])
+with _title_col:
+    st.title("📚 RAG Question Generator")
+    st.caption("Create and manage multiple knowledge bases · Powered by hybrid retrieval")
+with _status_col:
     if check_api_health():
-        st.success("✅ API Connected")
-        
-        stats = get_api_stats()
-        if stats:
-            st.metric("Total Documents", stats['documents']['total'])
-            st.metric("Total Chunks", stats['vector_store']['total_vectors'])
-            st.metric("Failed Documents", stats['documents']['failed'])
-            
-            with st.expander("⚙️ Configuration"):
-                st.text(f"Architecture: {stats['configuration'].get('architecture', 'v1')}")
-                st.text(f"LLM: {stats['configuration']['llm_provider']}")
-                st.text(f"Model: {stats['configuration']['llm_model']}")
+        st.success("🟢 Backend connected")
     else:
-        st.error("❌ API Not Connected")
-        st.warning("Make sure the backend is running")
+        st.error("🔴 Backend offline")
+
+# No sidebar content
 
 # Main tabs
 tab1, tab2, tab3 = st.tabs(["📑 Indexes", "📁 Add Documents", "🔍 Query & Questions"])
@@ -603,6 +599,7 @@ with tab1:
                     st.session_state.ci_preset = _pname
                     for _field, _ss_key in [
                         ("retrieval_mode",              "ci_retrieval_mode"),
+                        ("use_classification",          "ci_use_classification"),
                         ("chunk_size",                  "ci_chunk_size"),
                         ("chunk_overlap",               "ci_chunk_overlap"),
                         ("high_recall_chunking",        "ci_high_recall"),
@@ -630,6 +627,12 @@ with tab1:
                 format_func=lambda x: _mode_labels[x],
                 horizontal=True,
                 key="ci_retrieval_mode",
+            )
+            
+            st.checkbox(
+                "📊 Enable Content Classification",
+                key="ci_use_classification",
+                help="Split content by type (theory/formula/exercise). Disable for unified single-index mode (recommended for custom collections)."
             )
 
             _adv1, _adv2 = st.columns(2)
@@ -694,6 +697,7 @@ with tab1:
                     "index_name":                  _ci_name_val,
                     "description":                 _ci_desc_val or None,
                     "retrieval_mode":              st.session_state.ci_retrieval_mode,
+                    "use_classification":          st.session_state.ci_use_classification,
                     "chunk_size":                  st.session_state.ci_chunk_size,
                     "chunk_overlap":               st.session_state.ci_chunk_overlap,
                     "high_recall_chunking":        st.session_state.ci_high_recall,
@@ -747,14 +751,18 @@ with tab1:
 </div>""",
                     unsafe_allow_html=True,
                 )
-                if st.button(f"🗑️ Delete {idx['index_name']}", key=f"del_{idx['index_name']}", use_container_width=True):
-                    _del_ok, _del_res = delete_index(idx["index_name"])
-                    if _del_ok:
-                        st.success(f"Deleted {idx['index_name']}")
-                        time.sleep(0.8)
-                        st.rerun()
-                    else:
-                        st.error(_del_res.get("error", "Unknown error"))
+                _BUILTIN_INDEXES = {"theory", "formula", "exercise", "solution", "general"}
+                if idx['index_name'] in _BUILTIN_INDEXES:
+                    st.caption("🔒 Built-in index — cannot be deleted")
+                else:
+                    if st.button(f"🗑️ Delete {idx['index_name']}", key=f"del_{idx['index_name']}", use_container_width=True):
+                        _del_ok, _del_res = delete_index(idx["index_name"])
+                        if _del_ok:
+                            st.success(f"Deleted {idx['index_name']}")
+                            time.sleep(0.8)
+                            st.rerun()
+                        else:
+                            st.error(_del_res.get("error", "Unknown error"))
 
 
 # ========== TAB 2: Document Addition ==========
@@ -884,16 +892,30 @@ with tab3:
     
     # Select index for querying
     indexes_data = list_indexes()
-    index_names = ["All Indexes"] + ([idx['index_name'] for idx in indexes_data['indexes']] if indexes_data and indexes_data.get('indexes') else [])
-    
-    selected_query_index = st.selectbox(
-        "Search in Index",
-        index_names,
-        help="Choose which index to search (All = search all indexes)"
-    )
-    
+    indexes_list = indexes_data['indexes'] if indexes_data and indexes_data.get('indexes') else []
+    index_names = ["All Indexes"] + [idx['index_name'] for idx in indexes_list]
+
+    col_idx_sel, col_idx_info = st.columns([3, 2])
+    with col_idx_sel:
+        selected_query_index = st.selectbox(
+            "Search in Index",
+            index_names,
+            help="Choose which index to search (All = search all indexes)"
+        )
+    with col_idx_info:
+        if selected_query_index == "All Indexes":
+            total_docs = sum(idx.get('document_count', 0) for idx in indexes_list)
+            total_chunks = sum(idx.get('chunk_count', 0) for idx in indexes_list)
+            st.metric("Total docs (all indexes)", f"{total_docs:,}")
+            st.metric("Total chunks", f"{total_chunks:,}")
+        else:
+            sel_idx = next((idx for idx in indexes_list if idx['index_name'] == selected_query_index), None)
+            if sel_idx:
+                st.metric("Documents in index", f"{sel_idx.get('document_count', 0):,}")
+                st.metric("Chunks", f"{sel_idx.get('chunk_count', 0):,}")
+
     query_index = None if selected_query_index == "All Indexes" else selected_query_index
-    
+
     subtab1, subtab2 = st.tabs(["💬 Query", "❓ Generate Questions"])
     
     # Sub-tab 1: Query
@@ -905,7 +927,16 @@ with tab3:
             placeholder="What are Newton's laws of motion?",
             height=100
         )
-        
+
+        # Model selection — always visible
+        query_model = st.selectbox(
+            "🤖 Model",
+            ["qwen2.5:7b", "qwen3:0.6b", "llama3.2:3b", "Default"],
+            index=0,
+            key="query_model",
+            help="LLM used to generate the answer"
+        )
+
         # Advanced Settings
         with st.expander("⚙️ Advanced Query Settings", expanded=False):
             st.markdown("#### General Settings")
@@ -925,12 +956,8 @@ with tab3:
             
             col1, col2 = st.columns(2)
             with col1:
-                retrieval_llm = st.selectbox(
-                    "LLM",
-                    ["qwen2.5:7b", "qwen3:0.6b", "llama3.2:3b", "Default"],
-                    index=0,
-                    help="LLM for retrieval tasks"
-                )
+                retrieval_llm = query_model  # use the top-level selector
+                st.caption(f"Model: **{query_model}**")
             
             with col2:
                 search_type = st.selectbox(
@@ -1041,7 +1068,16 @@ with tab3:
     # Sub-tab 2: Generate Questions
     with subtab2:
         st.markdown("Generate practice questions from your knowledge base")
-        
+
+        # Model selection — always visible
+        gen_model = st.selectbox(
+            "🤖 Model",
+            ["qwen2.5:7b", "qwen3:0.6b", "llama3.2:3b", "Default"],
+            index=0,
+            key="gen_model",
+            help="LLM used to generate questions"
+        )
+
         col1, col2 = st.columns(2)
         
         with col1:
@@ -1072,7 +1108,8 @@ with tab3:
         if st.button("✨ Generate Questions", type="primary", use_container_width=True):
             with st.spinner(f"Generating {num_questions} {difficulty} questions..."):
                 result = generate_questions(
-                    subject, difficulty, question_type, num_questions, topic or None, query_index
+                    subject, difficulty, question_type, num_questions, topic or None, query_index,
+                    llm_model=gen_model if gen_model != "Default" else None
                 )
                 
                 if result and result.get('questions'):

@@ -1,8 +1,10 @@
 """
 FastAPI main application with all endpoints.
 """
+import json
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -43,8 +45,50 @@ retriever: HybridRetriever = None
 embedder: SentenceTransformerEmbedder = None
 question_generator: QuestionGenerator = None
 
-# Custom index storage (in-memory for now, could be persisted to DB)
+# Custom index storage — persisted to disk so indexes survive backend restarts
 custom_indexes: Dict[str, Dict[str, Any]] = {}
+
+_CUSTOM_INDEXES_FILE = Path("./data/custom_indexes.json")
+
+
+def _load_custom_indexes():
+    """Load custom indexes from disk into the in-memory dict."""
+    global custom_indexes
+    if not _CUSTOM_INDEXES_FILE.exists():
+        return
+    try:
+        with open(_CUSTOM_INDEXES_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        # Re-parse datetime strings back to datetime objects
+        for idx in raw.values():
+            for dt_field in ("created_at", "last_updated"):
+                val = idx.get(dt_field)
+                if isinstance(val, str):
+                    try:
+                        idx[dt_field] = datetime.fromisoformat(val)
+                    except ValueError:
+                        idx[dt_field] = None
+        custom_indexes = raw
+        app_logger.info(f"Loaded {len(custom_indexes)} custom indexes from disk")
+    except Exception as e:
+        app_logger.warning(f"Could not load custom indexes from disk: {e}")
+
+
+def _save_custom_indexes():
+    """Persist the in-memory custom_indexes dict to disk."""
+    try:
+        _CUSTOM_INDEXES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        serialisable = {}
+        for k, v in custom_indexes.items():
+            entry = dict(v)
+            for dt_field in ("created_at", "last_updated"):
+                if isinstance(entry.get(dt_field), datetime):
+                    entry[dt_field] = entry[dt_field].isoformat()
+            serialisable[k] = entry
+        with open(_CUSTOM_INDEXES_FILE, "w", encoding="utf-8") as f:
+            json.dump(serialisable, f, indent=2)
+    except Exception as e:
+        app_logger.warning(f"Could not save custom indexes to disk: {e}")
 
 
 @asynccontextmanager
@@ -57,6 +101,9 @@ async def lifespan(app: FastAPI):
     app_logger.info("Starting application with Advanced Hybrid RAG...")
     
     try:
+        # Load persisted custom indexes before anything else
+        _load_custom_indexes()
+
         # Only initialize ingestion manager on startup (needed for ingestion)
         # This loads the embedding model which is required for document vectorization
         app_logger.info("Initializing ingestion manager...")
@@ -258,6 +305,7 @@ async def query_knowledge_base(request: QueryRequest):
         
         # Determine which indexes to search
         specific_indexes = None
+        filter_metadata = None
         if request.index_name and request.index_name != "default":
             # Map index name to IndexType for the default specialized indexes
             index_mapping = {
@@ -271,9 +319,20 @@ async def query_knowledge_base(request: QueryRequest):
             if request.index_name in index_mapping:
                 specific_indexes = [index_mapping[request.index_name]]
                 app_logger.info(f"Query targeting specific index: {request.index_name}")
+            elif request.index_name in custom_indexes:
+                # Custom index - check if it uses classification
+                use_classification = custom_indexes[request.index_name].get('use_classification', False)
+                filter_metadata = {"custom_index_name": request.index_name}
+                
+                if use_classification:
+                    # Classification mode: search all indexes with metadata filter
+                    app_logger.info(f"Query targeting custom index with classification: {request.index_name}")
+                else:
+                    # Unified mode: search only GENERAL index with metadata filter
+                    specific_indexes = [IndexType.GENERAL]
+                    app_logger.info(f"Query targeting unified custom index (GENERAL only): {request.index_name}")
             else:
-                # Custom index - for now log it, could be extended to support custom indexes
-                app_logger.info(f"Query targeting custom index: {request.index_name} (routing via default behavior)")
+                app_logger.info(f"Query targeting unknown index: {request.index_name}, searching all")
         else:
             app_logger.info("Query searching all indexes with automatic routing")
         
@@ -284,6 +343,7 @@ async def query_knowledge_base(request: QueryRequest):
             top_k=retrieval_count,
             use_reranking=settings.ai_reranker,
             specific_indexes=specific_indexes,
+            filter_metadata=filter_metadata,
         )
         
         if not results:
@@ -393,6 +453,7 @@ async def create_index(request: CreateIndexRequest):
         custom_indexes[request.index_name] = {
             "index_name": request.index_name,
             "retrieval_mode": request.retrieval_mode,
+            "use_classification": request.use_classification,
             "chunk_size": request.chunk_size,
             "chunk_overlap": request.chunk_overlap,
             "embedding_model": request.embedding_model,
@@ -408,6 +469,7 @@ async def create_index(request: CreateIndexRequest):
             "chunk_count": 0,
         }
         
+        _save_custom_indexes()
         app_logger.info(f"Created new index: {request.index_name}")
         
         return {
@@ -524,6 +586,7 @@ async def delete_index(index_name: str, request: DeleteIndexRequest):
     try:
         # Remove index configuration
         del custom_indexes[index_name]
+        _save_custom_indexes()
         
         app_logger.info(f"Deleted index: {index_name}")
         
@@ -532,6 +595,35 @@ async def delete_index(index_name: str, request: DeleteIndexRequest):
     except Exception as e:
         app_logger.error(f"Error deleting index: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _ingest_and_update_count(idx_name: str, req: IngestionRequest):
+    """Run ingestion then update the custom index document/chunk counts."""
+    try:
+        result = ingestion_manager.ingest_documents(req)
+        if idx_name in custom_indexes:
+            processed = result.get("processed", 0)
+            skipped = result.get("skipped", 0)
+            # Count both processed AND skipped: skipped means already in the system,
+            # so they still belong to this index (e.g. re-ingesting same folder).
+            total_for_index = processed + skipped
+            custom_indexes[idx_name]["document_count"] = (
+                custom_indexes[idx_name].get("document_count", 0) + total_for_index
+            )
+            # Estimate chunk count using BM25 total (reflects actual indexed text chunks)
+            bm25_total = result.get("bm25_stats", {}).get("total_documents", 0)
+            custom_indexes[idx_name]["chunk_count"] = bm25_total if bm25_total else custom_indexes[idx_name]["document_count"]
+            custom_indexes[idx_name]["last_updated"] = datetime.now()
+            app_logger.info(
+                f"Updated index '{idx_name}' counts: "
+                f"document_count={custom_indexes[idx_name]['document_count']} "
+                f"(processed={processed}, skipped={skipped}), "
+                f"chunk_count={custom_indexes[idx_name]['chunk_count']}"
+            )
+            _save_custom_indexes()
+    except Exception as e:
+        app_logger.error(f"Ingestion error for index '{idx_name}': {e}")
+        raise
 
 
 @app.post("/api/indexes/{index_name}/ingest")
@@ -549,17 +641,23 @@ async def ingest_into_index(index_name: str, request: IndexIngestionRequest, bac
         raise HTTPException(status_code=400, detail="Ingestion already running")
     
     # Convert to standard ingestion request
+    use_classification = custom_indexes[index_name].get('use_classification', False) if index_name in custom_indexes else True
     ingestion_req = IngestionRequest(
         folder_path=request.folder_path if request.folder_path else "",
         recursive=request.recursive,
         file_patterns=request.file_patterns,
         force_reprocess=request.force_reprocess,
+        custom_index_name=index_name if index_name in custom_indexes else None,
+        use_classification=use_classification,
     )
     
     app_logger.info(f"Starting ingestion into index '{index_name}': {request.folder_path}")
     
-    # Run ingestion in background
-    background_tasks.add_task(ingestion_manager.ingest_documents, ingestion_req)
+    # Run ingestion in background; wrapper updates custom index doc/chunk counts on completion
+    if index_name in custom_indexes:
+        background_tasks.add_task(_ingest_and_update_count, index_name, ingestion_req)
+    else:
+        background_tasks.add_task(ingestion_manager.ingest_documents, ingestion_req)
     
     return {
         "message": f"Ingestion started for index '{index_name}'",

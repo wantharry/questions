@@ -63,6 +63,8 @@ class IngestionRequest(BaseModel):
         description="File patterns to match"
     )
     force_reprocess: bool = Field(default=False, description="Reprocess already indexed files")
+    custom_index_name: Optional[str] = Field(default=None, description="Custom index name to tag documents with")
+    use_classification: bool = Field(default=False, description="Enable content type classification and routing to specialized indexes")
     
     model_config = ConfigDict(json_schema_extra={
         "example": {
@@ -248,6 +250,7 @@ class CreateIndexRequest(BaseModel):
     """Request model for creating a new custom index."""
     index_name: str = Field(..., min_length=1, max_length=100, description="Unique name for the index")
     retrieval_mode: RetrievalMode = Field(default=RetrievalMode.HYBRID, description="Search mode")
+    use_classification: bool = Field(default=False, description="Enable content classification (theory/formula/exercise). False = unified index like old system")
     late_chunk_vectors: bool = Field(default=True, description="Compute vectors during indexing")
     high_recall_chunking: bool = Field(default=True, description="Use overlapping chunks for better recall")
     chunk_size: int = Field(default=512, ge=100, le=4000, description="Size of text chunks")

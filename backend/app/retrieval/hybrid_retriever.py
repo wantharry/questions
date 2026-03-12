@@ -98,11 +98,29 @@ class HybridRetriever:
         dense_results = self._normalize_scores(dense_results, 'score')
         
         # Step 3: Sparse search (BM25)
+        # Apply index filter to BM25 too so it only returns chunks from the
+        # same content-type bucket as the FAISS dense search.
+        bm25_filter = dict(filter_metadata) if filter_metadata else {}
+        if specific_indexes and len(specific_indexes) == 1:
+            bm25_filter['content_type'] = specific_indexes[0].value
+        elif specific_indexes and len(specific_indexes) > 1:
+            # BM25 filter only supports exact match per key; do post-filter below
+            pass
+
         sparse_results_raw = self.bm25.search(
             query,
             top_k=retrieval_k,
-            filter_metadata=filter_metadata
+            filter_metadata=bm25_filter if bm25_filter else filter_metadata
         )
+
+        # Post-filter for multi-index selections (BM25 can't do OR natively)
+        if specific_indexes and len(specific_indexes) > 1:
+            allowed = {idx.value for idx in specific_indexes}
+            sparse_results_raw = [
+                (doc_id, score, meta)
+                for doc_id, score, meta in sparse_results_raw
+                if meta.get('content_type') in allowed
+            ]
         
         # Convert BM25 results to standard format
         sparse_results = []
