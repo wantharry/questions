@@ -21,55 +21,92 @@ API_BASE_URL = os.environ.get("BACKEND_URL", "http://localhost:8601")
 # LaTeX rendering helpers
 # ---------------------------------------------------------------------------
 
+# Unicode superscript/subscript → LaTeX conversion tables
+_UNICODE_SUPERSCRIPTS = {
+    '⁰':'0','¹':'1','²':'2','³':'3','⁴':'4',
+    '⁵':'5','⁶':'6','⁷':'7','⁸':'8','⁹':'9',
+    'ⁿ':'n','ⁱ':'i','⁺':'+','⁻':'-','⁼':'=','⁽':'(','⁾':')',
+}
+_UNICODE_SUBSCRIPTS = {
+    '₀':'0','₁':'1','₂':'2','₃':'3','₄':'4',
+    '₅':'5','₆':'6','₇':'7','₈':'8','₉':'9',
+    '₊':'+','₋':'-','₌':'=','₍':'(','₎':')',
+    'ₐ':'a','ₑ':'e','ₒ':'o','ₙ':'n','ₓ':'x',
+}
+_SUP_PAT = re.compile('[' + ''.join(re.escape(c) for c in _UNICODE_SUPERSCRIPTS) + ']+')
+_SUB_PAT = re.compile('[' + ''.join(re.escape(c) for c in _UNICODE_SUBSCRIPTS) + ']+')
+
+# Build codepoint → ASCII map for Unicode mathematical alphanumeric letters
+# (Mathematical Bold/Italic/Sans-Serif/Monospace/Double-Struck A-Z and a-z)
+_MATH_ALPHA_MAP: dict = {}
+for _start, _base in [
+    (0x1D400, 65), (0x1D41A, 97),  # Bold A-Z, a-z
+    (0x1D434, 65), (0x1D44E, 97),  # Italic A-Z, a-z
+    (0x1D468, 65), (0x1D482, 97),  # Bold Italic A-Z, a-z
+    (0x1D538, 65), (0x1D552, 97),  # Double-Struck A-Z, a-z
+    (0x1D5A0, 65), (0x1D5BA, 97),  # Sans-Serif A-Z, a-z
+    (0x1D5D4, 65), (0x1D5EE, 97),  # Bold Sans-Serif A-Z, a-z
+    (0x1D608, 65), (0x1D622, 97),  # Italic Sans-Serif A-Z, a-z
+    (0x1D670, 65), (0x1D68A, 97),  # Monospace A-Z, a-z
+]:
+    for _i in range(26):
+        _MATH_ALPHA_MAP[_start + _i] = chr(_base + _i)
+
+# Unicode mathematical digits 0-9 (Bold, Double-Struck, Sans-Serif, etc.)
+for _start in [0x1D7CE, 0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6]:
+    for _i in range(10):
+        _MATH_ALPHA_MAP[_start + _i] = chr(48 + _i)
+
+
+def _norm_unicode_math(text: str) -> str:
+    """Remove invisible chars, normalize Unicode math letters and super/subscripts."""
+    # 1. Strip zero-width and soft-hyphen/BOM invisible characters
+    text = re.sub(r'[\u200b\u200c\u200d\u2060\u00ad\ufeff]', '', text)
+
+    # 2. Convert Unicode mathematical letter variants → plain ASCII
+    result = []
+    for ch in text:
+        cp = ord(ch)
+        result.append(_MATH_ALPHA_MAP[cp] if cp in _MATH_ALPHA_MAP else ch)
+    text = ''.join(result)
+
+    # 3. Convert Unicode super/subscript characters to LaTeX ^ and _
+    def _sup(m):
+        v = ''.join(_UNICODE_SUPERSCRIPTS[c] for c in m.group())
+        return f'^{{{v}}}' if len(v) > 1 else f'^{v}'
+
+    def _sub(m):
+        v = ''.join(_UNICODE_SUBSCRIPTS[c] for c in m.group())
+        return f'_{{{v}}}' if len(v) > 1 else f'_{v}'
+
+    text = _SUP_PAT.sub(_sup, text)
+    text = _SUB_PAT.sub(_sub, text)
+    return text
+
+
 def _find_math_spans(text: str) -> list:
-    """Find complete mathematical expressions in text.
-    
-    Returns list of (start, end, is_math) tuples where is_math=True
-    indicates a span that should be wrapped in $...$
-    """
+    """Return list of (start, end, is_math) spans for complete LaTeX expressions."""
     spans = []
     i = 0
     while i < len(text):
-        # Look for start of LaTeX command
         if i < len(text) - 1 and text[i] == '\\' and text[i+1].isalpha():
             start = i
-            # Extend forward to capture the complete mathematical expression
-            # Include: LaTeX commands, variables, operators, parentheses, subscripts/superscripts
             j = i + 1
             while j < len(text):
                 ch = text[j]
-                # Continue if we see:
-                # - Letters (LaTeX commands or variables)
-                # - Backslash (more LaTeX commands)
-                # - Math operators and symbols
-                # - Whitespace (between math elements)
-                # - Braces, parentheses, brackets (grouping)
-                # - Subscript/superscript markers
-                if (ch.isalnum() or ch in r'\{}[]()^_+-*/=<>,.| ' or ch.isspace()):
-                    # Check if we're starting a new LaTeX command
-                    if ch == '\\' and j + 1 < len(text) and text[j+1].isalpha():
-                        j += 1
-                        continue
+                if ch.isalnum() or ch in r'\{}[]()^_+-*/=<>,.| ' or ch.isspace():
                     j += 1
                 else:
-                    # Hit something that's definitely not part of math expression
                     break
-            
-            # Trim trailing spaces and check if we have substantial math content
             end = j
             while end > start and text[end-1].isspace():
                 end -= 1
-            
-            # Only mark as math if we have actual LaTeX commands (not just variables)
-            span_text = text[start:end]
-            if '\\' in span_text:
+            if '\\' in text[start:end]:
                 spans.append((start, end, True))
                 i = end
                 continue
-        
         i += 1
-    
-    # Fill in the gaps with non-math spans
+
     result = []
     pos = 0
     for start, end, is_math in spans:
@@ -79,35 +116,29 @@ def _find_math_spans(text: str) -> list:
         pos = end
     if pos < len(text):
         result.append((pos, len(text), False))
-    
     return result if spans else [(0, len(text), False)]
 
 
 def _wrap_exprs(text: str) -> str:
-    """Wrap complete mathematical expressions with $ delimiters."""
-    spans = _find_math_spans(text)
-    result = []
-    for start, end, is_math in spans:
-        span_text = text[start:end]
-        if is_math:
-            result.append(f'${span_text}$')
-        else:
-            result.append(span_text)
-    return ''.join(result)
+    """Wrap complete LaTeX math expressions with $ delimiters."""
+    parts = []
+    for start, end, is_math in _find_math_spans(text):
+        seg = text[start:end]
+        parts.append(f'${seg}$' if is_math else seg)
+    return ''.join(parts)
 
 
 def _delimit_line(line: str) -> str:
-    """Add $ delimiters to bare LaTeX in a single line."""
+    """Add $ delimiters to bare LaTeX commands in a single line."""
     if not re.search(r'\\[a-zA-Z]', line):
         return line
-    # Split on already-delimited spans; only process the plain-text segments
     parts = re.split(r'(\$\$[^$]*?\$\$|\$[^$\n]+?\$)', line)
     out = []
     for i, seg in enumerate(parts):
         if i % 2 == 1:
-            out.append(seg)                 # already inside $...$
+            out.append(seg)
         elif re.search(r'\\[a-zA-Z]', seg):
-            out.append(_wrap_exprs(seg))    # contains bare LaTeX
+            out.append(_wrap_exprs(seg))
         else:
             out.append(seg)
     return ''.join(out)
@@ -119,28 +150,39 @@ def render_latex_text(text: str) -> str:
         return text
 
     # ------------------------------------------------------------------
-    # Step 1: Restore control characters that JSON parsing turns LaTeX
-    # backslash sequences into.  e.g. JSON decodes \frac as \x0c + 'rac'
-    # because \f is a valid JSON escape (form-feed, U+000C).
-    # Only replace when followed by letters that continue a LaTeX command.
+    # Step 1: Unicode normalization
+    #   - Remove zero-width/invisible chars (U+200B etc.)
+    #   - Convert Unicode math letter variants (𝑚𝑜𝑑 → mod)
+    #   - Convert Unicode superscripts (² → ^2) and subscripts (₂ → _2)
     # ------------------------------------------------------------------
-    text = re.sub(r'\x0c([a-zA-Z])', r'\\f\1', text)  # \f : \frac, \forall …
-    text = re.sub(r'\x08([a-zA-Z])', r'\\b\1', text)  # \b : \beta, \bar …
-    text = re.sub(r'\x0d([a-zA-Z])', r'\\r\1', text)  # \r : \rho, \right …
-    # \t (0x09) – only convert before known LaTeX command continuations
+    text = _norm_unicode_math(text)
+
+    # ------------------------------------------------------------------
+    # Step 2: Restore control characters that JSON parsing corrupts.
+    #   json.loads() treats \f \b \r \t \n as escape sequences, silently
+    #   converting \frac → (form-feed)rac, \beta → (backspace)eta, etc.
+    # ------------------------------------------------------------------
+    text = re.sub(r'\x0c([a-zA-Z])', r'\\f\1', text)  # \frac, \forall …
+    text = re.sub(r'\x08([a-zA-Z])', r'\\b\1', text)  # \beta, \bar …
+    text = re.sub(r'\x0d([a-zA-Z])', r'\\r\1', text)  # \rho, \right …
     text = re.sub(r'\x09(au|heta|imes|ilde|o\b|ext|op\b)', r'\\t\1', text)
-    # \n can corrupt \nabla, \neq, \not, \nu – but real newlines must stay,
-    # so only convert when the newline is *mid-word* (directly before letters)
     text = re.sub(r'\n(abla|eq\b|ot\b|u\b)', r'\\n\1', text)
 
     # ------------------------------------------------------------------
-    # Step 2: Convert explicit LaTeX delimiters to Streamlit format
+    # Step 3: Fix misplaced $ delimiters.
+    #   LLMs sometimes write  ($\sqrt{5})^2  where the ( is outside $.
+    #   We swap: ($\ → $(\  so the paren is included in math mode.
+    # ------------------------------------------------------------------
+    text = re.sub(r'([(])(\$+)(\\)', r'\2\1\3', text)
+
+    # ------------------------------------------------------------------
+    # Step 4: Convert explicit LaTeX block/inline delimiters
     # ------------------------------------------------------------------
     text = re.sub(r'\\\[(.+?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
     text = re.sub(r'\\\((.+?)\\\)', r'$\1$',   text, flags=re.DOTALL)
 
     # ------------------------------------------------------------------
-    # Step 3: Auto-delimit any remaining bare LaTeX, line by line
+    # Step 5: Auto-delimit bare LaTeX commands, line by line
     # ------------------------------------------------------------------
     return '\n'.join(_delimit_line(line) for line in text.split('\n'))
 
