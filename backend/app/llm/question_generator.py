@@ -27,13 +27,15 @@ class QuestionGenerator:
     async def generate_questions(
         self,
         request: QuestionGenerationRequest,
+        llm=None,
     ) -> List[GeneratedQuestion]:
         """
         Generate questions based on the request.
-        
+
         Args:
             request: QuestionGenerationRequest with parameters
-        
+            llm: Optional custom LLM instance (uses self.llm if not provided)
+
         Returns:
             List of GeneratedQuestion objects
         """
@@ -80,6 +82,9 @@ class QuestionGenerator:
                 f"{request.question_type.value} questions for {request.subject.value}"
             )
             
+            # Use provided LLM or fall back to default
+            llm_to_use = llm or self.llm
+
             response = await llm_to_use.generate(
                 prompt=user_prompt,
                 system_prompt=system_prompt,

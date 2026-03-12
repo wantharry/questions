@@ -52,7 +52,7 @@ class HybridRetriever:
     ) -> List[Dict[str, Any]]:
         """
         Hybrid search with automatic query routing.
-        
+
         Args:
             query: Query text
             query_embedding: Query vector for dense search
@@ -61,30 +61,19 @@ class HybridRetriever:
             sparse_weight: Weight for sparse scores (0-1)
             use_reranking: Whether to rerank results
             filter_metadata: Optional metadata filters
-            specific_indexes: Specific indexes to search (None = use router)
-        
+            specific_indexes: Specific indexes to search (None = search all indexes by default)
+
         Returns:
             List of ranked documents with metadata
         """
-        
-        # Step 1: Route query if no specific indexes given
+
+        # Step 1: Default to all indexes if none specified
         if specific_indexes is None:
-            routing = self.query_router.route_query(query, filter_metadata)
-            specific_indexes = routing['recommended_indexes']
-            
-            # Use router's recommended strategy if not overridden
-            if dense_weight == 0.5 and sparse_weight == 0.5:
-                strategy = routing['search_strategy']
-                dense_weight = strategy['dense_weight']
-                sparse_weight = strategy['sparse_weight']
-                use_reranking = strategy['rerank']
-                
-                # Adjust retrieval count for reranking
-                retrieval_k = strategy['top_k_retrieval'] if use_reranking else top_k
-            else:
-                retrieval_k = top_k * 4 if use_reranking else top_k
-        else:
-            retrieval_k = top_k * 4 if use_reranking else top_k
+            # Search all available indexes by default
+            specific_indexes = list(self.multi_index.indexes.keys())
+
+        # Adjust retrieval count for reranking
+        retrieval_k = top_k * 4 if use_reranking else top_k
         
         # Step 2: Dense search (FAISS)
         dense_results = self.multi_index.search(

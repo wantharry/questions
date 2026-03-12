@@ -235,14 +235,24 @@ async def query_knowledge_base(request: QueryRequest):
         chunks = []
         for i, result in enumerate(results):
             context_parts.append(f"Source {i+1}:\n{result['text']}")
+
+            # Extract source file name from various metadata fields
+            source_file = (
+                result['metadata'].get('file_name') or
+                result['metadata'].get('document_name') or
+                result['metadata'].get('source') or
+                'Unknown'
+            )
+
             chunks.append({
                 'chunk_id': result['metadata'].get('chunk_id', result.get('id', f'chunk_{i}')),
                 'content': result['text'],
-                'source_file': result['metadata'].get('file_name', 'Unknown'),
+                'source_file': source_file,
                 'page_number': result['metadata'].get('page_number'),
                 'similarity_score': result.get('hybrid_score', result.get('score', 0.0)),
-                'content_type': result['metadata'].get('content_type', 'unknown'),
-                'difficulty': result['metadata'].get('difficulty', 'unknown'),
+                'content_type': result['metadata'].get('content_type') or 'unknown',
+                'difficulty': result['metadata'].get('difficulty') or 'unknown',
+                'index_type': result['metadata'].get('index_type') or 'unknown',
             })
         
         context = "\n\n".join(context_parts)

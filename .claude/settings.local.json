@@ -3,7 +3,18 @@
     "allow": [
       "Bash(source:*)",
       "Bash(lsof:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(sqlite3:*)",
+      "Bash(python3:*)",
+      "Bash(pkill:*)",
+      "Bash(git checkout:*)",
+      "Bash(ls:*)",
+      "Bash(chmod +x:*)",
+      "Bash(./status.sh:*)",
+      "Bash(bash:*)",
+      "Bash(dos2unix:*)",
+      "Bash(./stop_all.sh:*)",
+      "Bash(./restart_all.sh:*)"
     ]
   }
 }
