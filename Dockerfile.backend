@@ -1,0 +1,46 @@
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    # PDF processing
+    libpoppler-cpp-dev \
+    poppler-utils \
+    # OCR
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    # Image processing
+    libmagic1 \
+    # Build tools
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY backend/requirements.txt /app/requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy backend application code (only source code, not data - data is volume-mounted)
+COPY backend/app /app/backend/app
+
+# Create necessary directories
+RUN mkdir -p /app/data/vector_store /app/data/metadata /app/data/logs /app/models
+
+# Set Python path
+ENV PYTHONPATH=/app/backend
+
+# Expose port
+EXPOSE 8601
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8601/health || exit 1
+
+# Run FastAPI with uvicorn
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8601", "--workers", "1"]

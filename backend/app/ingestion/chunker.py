@@ -2,7 +2,10 @@
 Text chunking strategies with overlap support.
 """
 from typing import List, Dict, Any
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
 from app.config import settings
 from app.utils.logger import app_logger
 

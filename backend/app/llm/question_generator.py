@@ -121,26 +121,37 @@ class QuestionGenerator:
                 # Try multiple parsing strategies
                 parsed = None
                 parse_errors = []
-                
-                # Strategy 1: Direct parsing
+
+                # Pre-process: escape ALL bare LaTeX backslashes for JSON.
+                # JSON only reserves \", \\, \/ as backslash escapes we want to keep.
+                # Everything else (\f \b \n \r \t \u included) is treated as a LaTeX
+                # backslash and must be doubled so json.loads can decode it correctly.
+                # This fixes: \frac→(form-feed)rac, \beta→(backspace)eta, etc.
+                json_str_latex = re.sub(r'\\(?!["\\/])', r'\\\\', json_str)
+
+                # Strategy 1: latex-escaped + strict
                 try:
-                    parsed = json.loads(json_str)
+                    parsed = json.loads(json_str_latex)
                 except json.JSONDecodeError as e:
-                    parse_errors.append(f"Direct parse: {e}")
-                    
-                    # Strategy 2: Try with strict=False to allow control characters
+                    parse_errors.append(f"Latex-escaped strict: {e}")
+
+                    # Strategy 2: latex-escaped + lenient (allows literal newlines in strings)
                     try:
-                        parsed = json.loads(json_str, strict=False)
+                        parsed = json.loads(json_str_latex, strict=False)
                     except json.JSONDecodeError as e2:
-                        parse_errors.append(f"Lenient parse: {e2}")
-                        
-                        # Strategy 3: Escape backslashes (common with LaTeX)
+                        parse_errors.append(f"Latex-escaped lenient: {e2}")
+
+                        # Strategy 3: original string, strict (handles double-escaped \\frac)
                         try:
-                            # This regex replaces \ with \\ only if not already followed by another \
-                            json_str_escaped = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_str)
-                            parsed = json.loads(json_str_escaped)
-                        except (json.JSONDecodeError, re.error) as e3:
-                            parse_errors.append(f"Escaped parse: {e3}")
+                            parsed = json.loads(json_str)
+                        except json.JSONDecodeError as e3:
+                            parse_errors.append(f"Direct strict: {e3}")
+
+                            # Strategy 4: original string, lenient
+                            try:
+                                parsed = json.loads(json_str, strict=False)
+                            except json.JSONDecodeError as e4:
+                                parse_errors.append(f"Direct lenient: {e4}")
                 
                 if parsed and isinstance(parsed, list):
                     for item in parsed:

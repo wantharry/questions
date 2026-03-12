@@ -27,7 +27,7 @@ from app.models import (
     AdvancedQuerySettings,
     SearchType,
 )
-from app.models_advanced import HybridSearchRequest
+from app.models_advanced import HybridSearchRequest, IndexType
 from app.ingestion.advanced_ingestion_manager import AdvancedIngestionManager
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.ingestion.embedder import SentenceTransformerEmbedder
@@ -137,6 +137,17 @@ def get_question_generator():
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
     """Check application health."""
+    if ingestion_manager is None:
+        # Still starting up
+        return HealthCheck(
+            status="starting",
+            llm_provider=settings.llm_provider,
+            embedding_provider=settings.embedding_provider,
+            vector_store_type="hybrid_multi_index",
+            total_documents=0,
+            total_chunks=0,
+        )
+
     status = ingestion_manager.get_ingestion_status()
     
     # Count total chunks across all indexes

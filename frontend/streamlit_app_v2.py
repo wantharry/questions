@@ -2,6 +2,7 @@
 Enhanced Streamlit UI for the RAG Question Generator with Multiple Index Support.
 Supports creating custom indexes, uploading files, and querying specific indexes.
 """
+import os
 import streamlit as st
 import requests
 import time
@@ -12,35 +13,136 @@ from typing import Optional, List
 import pandas as pd
 
 
-# Configuration
-API_BASE_URL = "http://localhost:8601"
+# Configuration - use BACKEND_URL env var (set in Docker), fallback to localhost for local dev
+API_BASE_URL = os.environ.get("BACKEND_URL", "http://localhost:8601")
+
+
+# ---------------------------------------------------------------------------
+# LaTeX rendering helpers
+# ---------------------------------------------------------------------------
+
+def _find_math_spans(text: str) -> list:
+    """Find complete mathematical expressions in text.
+    
+    Returns list of (start, end, is_math) tuples where is_math=True
+    indicates a span that should be wrapped in $...$
+    """
+    spans = []
+    i = 0
+    while i < len(text):
+        # Look for start of LaTeX command
+        if i < len(text) - 1 and text[i] == '\\' and text[i+1].isalpha():
+            start = i
+            # Extend forward to capture the complete mathematical expression
+            # Include: LaTeX commands, variables, operators, parentheses, subscripts/superscripts
+            j = i + 1
+            while j < len(text):
+                ch = text[j]
+                # Continue if we see:
+                # - Letters (LaTeX commands or variables)
+                # - Backslash (more LaTeX commands)
+                # - Math operators and symbols
+                # - Whitespace (between math elements)
+                # - Braces, parentheses, brackets (grouping)
+                # - Subscript/superscript markers
+                if (ch.isalnum() or ch in r'\{}[]()^_+-*/=<>,.| ' or ch.isspace()):
+                    # Check if we're starting a new LaTeX command
+                    if ch == '\\' and j + 1 < len(text) and text[j+1].isalpha():
+                        j += 1
+                        continue
+                    j += 1
+                else:
+                    # Hit something that's definitely not part of math expression
+                    break
+            
+            # Trim trailing spaces and check if we have substantial math content
+            end = j
+            while end > start and text[end-1].isspace():
+                end -= 1
+            
+            # Only mark as math if we have actual LaTeX commands (not just variables)
+            span_text = text[start:end]
+            if '\\' in span_text:
+                spans.append((start, end, True))
+                i = end
+                continue
+        
+        i += 1
+    
+    # Fill in the gaps with non-math spans
+    result = []
+    pos = 0
+    for start, end, is_math in spans:
+        if pos < start:
+            result.append((pos, start, False))
+        result.append((start, end, True))
+        pos = end
+    if pos < len(text):
+        result.append((pos, len(text), False))
+    
+    return result if spans else [(0, len(text), False)]
+
+
+def _wrap_exprs(text: str) -> str:
+    """Wrap complete mathematical expressions with $ delimiters."""
+    spans = _find_math_spans(text)
+    result = []
+    for start, end, is_math in spans:
+        span_text = text[start:end]
+        if is_math:
+            result.append(f'${span_text}$')
+        else:
+            result.append(span_text)
+    return ''.join(result)
+
+
+def _delimit_line(line: str) -> str:
+    """Add $ delimiters to bare LaTeX in a single line."""
+    if not re.search(r'\\[a-zA-Z]', line):
+        return line
+    # Split on already-delimited spans; only process the plain-text segments
+    parts = re.split(r'(\$\$[^$]*?\$\$|\$[^$\n]+?\$)', line)
+    out = []
+    for i, seg in enumerate(parts):
+        if i % 2 == 1:
+            out.append(seg)                 # already inside $...$
+        elif re.search(r'\\[a-zA-Z]', seg):
+            out.append(_wrap_exprs(seg))    # contains bare LaTeX
+        else:
+            out.append(seg)
+    return ''.join(out)
 
 
 def render_latex_text(text: str) -> str:
-    r"""Convert LaTeX expressions to Streamlit-compatible format."""
+    r"""Normalise LLM output so Streamlit/KaTeX renders all math correctly."""
     if not text:
         return text
 
-    text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
-    text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+    # ------------------------------------------------------------------
+    # Step 1: Restore control characters that JSON parsing turns LaTeX
+    # backslash sequences into.  e.g. JSON decodes \frac as \x0c + 'rac'
+    # because \f is a valid JSON escape (form-feed, U+000C).
+    # Only replace when followed by letters that continue a LaTeX command.
+    # ------------------------------------------------------------------
+    text = re.sub(r'\x0c([a-zA-Z])', r'\\f\1', text)  # \f : \frac, \forall …
+    text = re.sub(r'\x08([a-zA-Z])', r'\\b\1', text)  # \b : \beta, \bar …
+    text = re.sub(r'\x0d([a-zA-Z])', r'\\r\1', text)  # \r : \rho, \right …
+    # \t (0x09) – only convert before known LaTeX command continuations
+    text = re.sub(r'\x09(au|heta|imes|ilde|o\b|ext|op\b)', r'\\t\1', text)
+    # \n can corrupt \nabla, \neq, \not, \nu – but real newlines must stay,
+    # so only convert when the newline is *mid-word* (directly before letters)
+    text = re.sub(r'\n(abla|eq\b|ot\b|u\b)', r'\\n\1', text)
 
-    lines = text.split('\n')
-    result_lines = []
-    for line in lines:
-        if '$' in line or '$$' in line:
-            result_lines.append(line)
-        elif any(cmd in line for cmd in [r'\frac', r'\sqrt', r'\int', r'\sum', r'\prod',
-                                         r'\sin', r'\cos', r'\tan', r'\log', r'\exp',
-                                         r'\alpha', r'\beta', r'\gamma', r'\delta', r'\pi',
-                                         r'\infty', r'\partial', r'\nabla', r'\pm', r'\times']):
-            if '{' in line or '^' in line or '_' in line:
-                result_lines.append(f"${line}$")
-            else:
-                result_lines.append(line)
-        else:
-            result_lines.append(line)
+    # ------------------------------------------------------------------
+    # Step 2: Convert explicit LaTeX delimiters to Streamlit format
+    # ------------------------------------------------------------------
+    text = re.sub(r'\\\[(.+?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+    text = re.sub(r'\\\((.+?)\\\)', r'$\1$',   text, flags=re.DOTALL)
 
-    return '\n'.join(result_lines)
+    # ------------------------------------------------------------------
+    # Step 3: Auto-delimit any remaining bare LaTeX, line by line
+    # ------------------------------------------------------------------
+    return '\n'.join(_delimit_line(line) for line in text.split('\n'))
 
 
 def convert_windows_to_wsl_path(path: str) -> str:
@@ -189,6 +291,92 @@ def generate_questions(
         return None
 
 
+# ──────────────────────────────────────────────────────────────────
+# Index Creation Presets – best defaults for common use cases
+# ──────────────────────────────────────────────────────────────────
+INDEX_PRESETS = {
+    "📚 Academic": {
+        "label": "Textbooks, lecture notes, course materials",
+        "retrieval_mode": "hybrid",
+        "chunk_size": 800,
+        "chunk_overlap": 100,
+        "high_recall_chunking": True,
+        "late_chunk_vectors": True,
+        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "overview_llm": "None",
+        "enable_contextual_retrieval": False,
+        "context_window": 5,
+        "retrieval_llm": "qwen2.5:7b",
+        "batch_size": 32,
+    },
+    "📄 General": {
+        "label": "PDFs, reports, mixed documents",
+        "retrieval_mode": "hybrid",
+        "chunk_size": 512,
+        "chunk_overlap": 64,
+        "high_recall_chunking": True,
+        "late_chunk_vectors": True,
+        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "overview_llm": "None",
+        "enable_contextual_retrieval": False,
+        "context_window": 5,
+        "retrieval_llm": "qwen2.5:7b",
+        "batch_size": 32,
+    },
+    "🔬 Research": {
+        "label": "Academic papers, articles, technical reports",
+        "retrieval_mode": "hybrid",
+        "chunk_size": 1000,
+        "chunk_overlap": 150,
+        "high_recall_chunking": True,
+        "late_chunk_vectors": True,
+        "embedding_model": "sentence-transformers/all-mpnet-base-v2",
+        "overview_llm": "None",
+        "enable_contextual_retrieval": False,
+        "context_window": 5,
+        "retrieval_llm": "qwen2.5:7b",
+        "batch_size": 16,
+    },
+    "⚡ Quick": {
+        "label": "Fast indexing for quick prototyping",
+        "retrieval_mode": "vector",
+        "chunk_size": 256,
+        "chunk_overlap": 32,
+        "high_recall_chunking": False,
+        "late_chunk_vectors": False,
+        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "overview_llm": "None",
+        "enable_contextual_retrieval": False,
+        "context_window": 5,
+        "retrieval_llm": "qwen2.5:7b",
+        "batch_size": 64,
+    },
+}
+_DEFAULT_PRESET = "📚 Academic"
+
+
+def _init_ci_state():
+    """Initialise session-state keys for the Create-Index form (first run only)."""
+    preset = INDEX_PRESETS[_DEFAULT_PRESET]
+    defaults = {
+        "ci_preset":             _DEFAULT_PRESET,
+        "ci_retrieval_mode":     preset["retrieval_mode"],
+        "ci_chunk_size":         preset["chunk_size"],
+        "ci_chunk_overlap":      preset["chunk_overlap"],
+        "ci_high_recall":        preset["high_recall_chunking"],
+        "ci_late_chunk":         preset["late_chunk_vectors"],
+        "ci_embedding_model":    preset["embedding_model"],
+        "ci_overview_llm":       preset["overview_llm"],
+        "ci_enable_contextual":  preset["enable_contextual_retrieval"],
+        "ci_context_window":     preset["context_window"],
+        "ci_retrieval_llm":      preset["retrieval_llm"],
+        "ci_batch_size":         preset["batch_size"],
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
 # Page configuration
 st.set_page_config(
     page_title="RAG Question Generator - Multi-Index",
@@ -200,41 +388,115 @@ st.set_page_config(
 # Custom CSS
 st.markdown("""
 <style>
+    /* ── Layout ── */
+    .main .block-container { padding-top: 1.5rem; }
+
+    /* ── Tabs ── */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
+        gap: 4px;
+        background: #f1f5f9;
+        border-radius: 10px;
+        padding: 4px;
     }
     .stTabs [data-baseweb="tab"] {
-        height: 50px;
+        height: 40px;
         padding-left: 20px;
         padding-right: 20px;
+        border-radius: 8px;
+        font-weight: 500;
+        font-size: 0.9rem;
     }
+    .stTabs [aria-selected="true"] {
+        background-color: #ffffff !important;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+    }
+
+    /* ── Index cards ── */
+    .index-card {
+        padding: 1rem 1.25rem;
+        border-radius: 12px;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        margin-bottom: 0.7rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+
+    /* ── Config summary card ── */
+    .config-summary {
+        background: linear-gradient(135deg, #eff6ff 0%, #f0f4ff 100%);
+        border: 1px solid #c7d4f7;
+        border-radius: 12px;
+        padding: 1.2rem 1.4rem;
+        line-height: 1.9;
+        margin-bottom: 1rem;
+    }
+    .config-summary .cs-title {
+        font-size: 1rem;
+        font-weight: 700;
+        color: #1e3a8a;
+        margin-bottom: 0.5rem;
+    }
+    .config-summary .cs-row {
+        font-size: 0.875rem;
+        color: #334155;
+    }
+    .config-summary .cs-foot {
+        font-size: 0.78rem;
+        color: #64748b;
+        margin-top: 0.6rem;
+        padding-top: 0.5rem;
+        border-top: 1px solid #dbe4f7;
+    }
+
+    /* ── Success / info boxes ── */
     .success-box {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        background-color: #d4edda;
-        border: 1px solid #c3e6cb;
-        color: #155724;
+        padding: 1.2rem 1.4rem;
+        border-radius: 10px;
+        background: #f0fdf4;
+        border: 1px solid #bbf7d0;
+        color: #166534;
+        line-height: 1.7;
     }
     .info-box {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        background-color: #d1ecf1;
-        border: 1px solid #bee5eb;
-        color: #0c5460;
+        padding: 1.2rem 1.4rem;
+        border-radius: 10px;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        color: #1e40af;
     }
-    .index-card {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        background-color: #f8f9fa;
-        border: 1px solid #dee2e6;
-        margin-bottom: 0.5rem;
+
+    /* ── Metric cards ── */
+    div[data-testid="metric-container"] {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 0.6rem 0.8rem;
+    }
+
+    /* ── Divider ── */
+    hr { border-color: #e2e8f0; margin: 1rem 0; }
+
+    /* ── Section headers ── */
+    .section-header {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #1e293b;
+        margin-bottom: 0.25rem;
+    }
+    .section-sub {
+        font-size: 0.85rem;
+        color: #64748b;
+        margin-bottom: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
+# Initialise Create-Index session state on every rerun (no-op after first run)
+_init_ci_state()
+
 # Title and header
-st.title("📚 RAG Question Generator - Multi-Index")
-st.markdown("Create and manage multiple knowledge bases with custom configurations")
+st.title("📚 RAG Question Generator")
+st.caption("Create and manage multiple knowledge bases · Powered by hybrid retrieval")
 
 # Sidebar - System Status
 with st.sidebar:
@@ -262,167 +524,195 @@ tab1, tab2, tab3 = st.tabs(["📑 Indexes", "📁 Add Documents", "🔍 Query & 
 
 # ========== TAB 1: Index Management ==========
 with tab1:
-    st.header("Index Management")
-    
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.markdown("Create and manage multiple knowledge base indexes")
-    with col2:
-        if st.button("🔄 Refresh Indexes"):
-            st.rerun()
-    
-    # List existing indexes
-    indexes_data = list_indexes()
-    if indexes_data and indexes_data.get('indexes'):
-        st.markdown("### Existing Indexes")
-        
-        for idx in indexes_data['indexes']:
-            with st.container():
-                st.markdown(f"""
-                <div class='index-card'>
-                    <h4>📊 {idx['index_name']}</h4>
-                    <p><strong>Mode:</strong> {idx['retrieval_mode']} | <strong>Chunks:</strong> {idx['chunk_count']} | <strong>Docs:</strong> {idx['document_count']}</p>
-                    <p><small>{idx.get('description', 'No description')}</small></p>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                col_a, col_b = st.columns([4, 1])
-                with col_b:
-                    if st.button(f"🗑️ Delete", key=f"del_{idx['index_name']}"):
-                        success, result = delete_index(idx['index_name'])
-                        if success:
-                            st.success(f"Deleted {idx['index_name']}")
-                            time.sleep(1)
-                            st.rerun()
-                        else:
-                            st.error(f"Error: {result.get('error', 'Unknown error')}")
-    
-    st.markdown("---")
-    
-    # Create new index form
-    st.markdown("### Create New Index")
-    
-    with st.form("create_index_form"):
-        st.markdown("#### INDEX CONFIGURATION")
-        
-        index_name = st.text_input(
-            "Index Name",
-            placeholder="physics_textbooks",
-            help="Unique name for this index"
+
+    col_create, col_indexes = st.columns([12, 9], gap="large")
+
+    # ─────────────────────────────────────────────────────────────
+    # LEFT: Create New Index
+    # ─────────────────────────────────────────────────────────────
+    with col_create:
+        st.markdown("<div class='section-header'>✨ Create New Index</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-sub'>Pick a profile, name your index, then hit Create. Advanced settings are pre-configured for best results.</div>", unsafe_allow_html=True)
+
+        ci_name = st.text_input(
+            "Index Name *",
+            placeholder="e.g. physics_textbooks",
+            help="Lowercase letters, numbers, and underscores only",
+            key="ci_name_field",
         )
-        
-        description = st.text_area(
-            "Description (optional)",
-            placeholder="Physics textbooks for undergraduate level",
-            height=60
+        ci_desc = st.text_input(
+            "Description",
+            placeholder="Optional — e.g. Undergraduate physics course materials",
+            key="ci_desc_field",
         )
-        
-        st.markdown("---")
-        st.markdown("#### RETRIEVAL MODE")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            retrieval_mode = st.radio(
-                "Mode",
-                ["hybrid", "vector", "fts"],
-                index=0,
-                help="Hybrid combines semantic + keyword search"
+
+        st.markdown("**Profile** — choose what best matches your documents")
+        p_cols = st.columns(len(INDEX_PRESETS))
+        for _pi, (_pname, _pdata) in enumerate(INDEX_PRESETS.items()):
+            with p_cols[_pi]:
+                _is_active = (st.session_state.ci_preset == _pname)
+                if st.button(
+                    _pname,
+                    key=f"ci_preset_btn_{_pi}",
+                    use_container_width=True,
+                    type="primary" if _is_active else "secondary",
+                    help=_pdata["label"],
+                ):
+                    st.session_state.ci_preset = _pname
+                    for _field, _ss_key in [
+                        ("retrieval_mode",              "ci_retrieval_mode"),
+                        ("chunk_size",                  "ci_chunk_size"),
+                        ("chunk_overlap",               "ci_chunk_overlap"),
+                        ("high_recall_chunking",        "ci_high_recall"),
+                        ("late_chunk_vectors",          "ci_late_chunk"),
+                        ("embedding_model",             "ci_embedding_model"),
+                        ("overview_llm",                "ci_overview_llm"),
+                        ("enable_contextual_retrieval", "ci_enable_contextual"),
+                        ("context_window",              "ci_context_window"),
+                        ("retrieval_llm",               "ci_retrieval_llm"),
+                        ("batch_size",                  "ci_batch_size"),
+                    ]:
+                        st.session_state[_ss_key] = _pdata[_field]
+                    st.rerun()
+
+        st.caption(f"ℹ️ *{INDEX_PRESETS[st.session_state.ci_preset]['label']}*")
+
+        with st.expander("⚙️ Advanced Settings", expanded=False):
+            st.caption("Auto-configured from the profile above. Tweak only if needed.")
+
+            _mode_opts = ["hybrid", "vector", "fts"]
+            _mode_labels = {"hybrid": "Hybrid — best results", "vector": "Semantic only", "fts": "Keyword only"}
+            st.radio(
+                "Retrieval Mode",
+                _mode_opts,
+                format_func=lambda x: _mode_labels[x],
+                horizontal=True,
+                key="ci_retrieval_mode",
             )
-        
-        st.markdown("---")
-        st.markdown("#### CHUNKING SETTINGS")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            late_chunk_vectors = st.checkbox("Late-chunk vectors", value=True)
-            chunk_size = st.number_input("Chunk size", min_value=100, max_value=4000, value=512)
-        
-        with col2:
-            high_recall_chunking = st.checkbox("High-recall chunking", value=True)
-            chunk_overlap = st.number_input("Chunk overlap", min_value=0, max_value=500, value=64)
-        
-        st.markdown("---")
-        st.markdown("#### MODELS")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            embedding_model = st.selectbox(
-                "Embedding model",
-                [
-                    "sentence-transformers/all-MiniLM-L6-v2",
-                    "sentence-transformers/all-mpnet-base-v2",
-                    "BAAI/bge-small-en-v1.5",
-                    "Qwen/Qwen3-Embedding-0.6B",
-                ],
-                index=0
-            )
-        
-        with col2:
-            overview_llm = st.selectbox(
-                "Overview LLM",
-                ["qwen3:0.6b", "qwen2.5:7b", "llama3.2:3b", "None"],
-                index=1
-            )
-        
-        st.markdown("---")
-        st.markdown("#### CONTEXTUAL RETRIEVAL")
-        
-        enable_contextual = st.checkbox("Enable", value=False)
-        
-        if enable_contextual:
-            col1, col2 = st.columns(2)
-            with col1:
-                context_window = st.number_input("Context window", min_value=1, max_value=20, value=5)
-            with col2:
-                retrieval_llm = st.selectbox(
-                    "Retrieval LLM",
-                    ["qwen3:0.6b", "qwen2.5:7b", "llama3.2:3b"],
-                    index=1
-                )
-        else:
-            context_window = 5
-            retrieval_llm = "qwen2.5:7b"
-        
-        st.markdown("---")
-        st.markdown("#### BATCH SIZE")
-        
-        batch_size = st.number_input("Batch size", min_value=1, max_value=256, value=32)
-        
-        st.markdown("---")
-        
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            cancel_button = st.form_submit_button("Cancel", use_container_width=True)
-        with col2:
-            submit_button = st.form_submit_button("✨ Create Index", type="primary", use_container_width=True)
-        
-        if submit_button:
-            if not index_name:
-                st.error("Please enter an index name")
+
+            _adv1, _adv2 = st.columns(2)
+            with _adv1:
+                st.number_input("Chunk Size", min_value=100, max_value=4000, step=50, key="ci_chunk_size")
+                st.checkbox("Late-chunk Vectors", key="ci_late_chunk",
+                            help="Embed chunks with surrounding context for richer vectors")
+            with _adv2:
+                st.number_input("Chunk Overlap", min_value=0, max_value=500, step=10, key="ci_chunk_overlap")
+                st.checkbox("High-recall Chunking", key="ci_high_recall",
+                            help="Smaller sub-chunks for finer-grained retrieval")
+
+            _emb_opts = [
+                "sentence-transformers/all-MiniLM-L6-v2",
+                "sentence-transformers/all-mpnet-base-v2",
+                "BAAI/bge-small-en-v1.5",
+            ]
+            st.selectbox("Embedding Model", _emb_opts, key="ci_embedding_model")
+
+            _adv3, _adv4 = st.columns(2)
+            with _adv3:
+                st.number_input("Batch Size", min_value=1, max_value=256, key="ci_batch_size")
+            with _adv4:
+                _llm_opts = ["None", "qwen3:0.6b", "qwen2.5:7b", "llama3.2:3b"]
+                st.selectbox("Overview LLM", _llm_opts, key="ci_overview_llm",
+                             help="LLM used to generate paragraph overviews during ingestion")
+
+            st.checkbox("Enable Contextual Retrieval", key="ci_enable_contextual",
+                        help="Prepend chunk context summaries for improved relevance")
+            if st.session_state.ci_enable_contextual:
+                _adv5, _adv6 = st.columns(2)
+                with _adv5:
+                    st.number_input("Context Window", min_value=1, max_value=20, key="ci_context_window")
+                with _adv6:
+                    _ctx_llm_opts = ["qwen2.5:7b", "qwen3:0.6b", "llama3.2:3b"]
+                    st.selectbox("Contextual LLM", _ctx_llm_opts, key="ci_retrieval_llm")
+
+        # Config summary pill row
+        _rm = st.session_state.ci_retrieval_mode
+        _rm_emoji = {"hybrid": "🔀", "vector": "🧠", "fts": "🔍"}.get(_rm, "🔀")
+        _emb_short = st.session_state.ci_embedding_model.split("/")[-1]
+        _hr_icon = "✅" if st.session_state.ci_high_recall else "—"
+        _lc_icon = "✅" if st.session_state.ci_late_chunk  else "—"
+        st.markdown(
+            f"""<div class="config-summary">
+  <div class="cs-title">{st.session_state.ci_preset}</div>
+  <div class="cs-row">{_rm_emoji} <b>Retrieval:</b> {_rm.capitalize()} &nbsp;·&nbsp;
+     📦 <b>Chunk:</b> {st.session_state.ci_chunk_size} / {st.session_state.ci_chunk_overlap} overlap &nbsp;·&nbsp;
+     🔬 High-recall: {_hr_icon} &nbsp;·&nbsp; ⚡ Late-chunk: {_lc_icon}</div>
+  <div class="cs-foot">🤖 {_emb_short} &nbsp;·&nbsp; batch {st.session_state.ci_batch_size}</div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+        if st.button("✨ Create Index", type="primary", use_container_width=True, key="ci_create_btn"):
+            _ci_name_val = st.session_state.get("ci_name_field", "").strip()
+            _ci_desc_val = st.session_state.get("ci_desc_field", "").strip()
+            if not _ci_name_val:
+                st.error("Please enter an Index Name.")
             else:
-                config = {
-                    "index_name": index_name,
-                    "retrieval_mode": retrieval_mode,
-                    "late_chunk_vectors": late_chunk_vectors,
-                    "high_recall_chunking": high_recall_chunking,
-                    "chunk_size": chunk_size,
-                    "chunk_overlap": chunk_overlap,
-                    "embedding_model": embedding_model,
-                    "overview_llm": overview_llm if overview_llm != "None" else None,
-                    "enable_contextual_retrieval": enable_contextual,
-                    "context_window": context_window,
-                    "retrieval_llm": retrieval_llm if enable_contextual else None,
-                    "batch_size": batch_size,
-                    "description": description if description else None,
+                _config = {
+                    "index_name":                  _ci_name_val,
+                    "description":                 _ci_desc_val or None,
+                    "retrieval_mode":              st.session_state.ci_retrieval_mode,
+                    "chunk_size":                  st.session_state.ci_chunk_size,
+                    "chunk_overlap":               st.session_state.ci_chunk_overlap,
+                    "high_recall_chunking":        st.session_state.ci_high_recall,
+                    "late_chunk_vectors":          st.session_state.ci_late_chunk,
+                    "embedding_model":             st.session_state.ci_embedding_model,
+                    "overview_llm":                st.session_state.ci_overview_llm if st.session_state.ci_overview_llm != "None" else None,
+                    "enable_contextual_retrieval": st.session_state.ci_enable_contextual,
+                    "context_window":              st.session_state.ci_context_window,
+                    "retrieval_llm":               st.session_state.ci_retrieval_llm if st.session_state.ci_enable_contextual else None,
+                    "batch_size":                  st.session_state.ci_batch_size,
                 }
-                
-                success, result = create_index(config)
-                if success:
-                    st.success(f"✅ Index '{index_name}' created successfully!")
+                _success, _result = create_index(_config)
+                if _success:
+                    st.success(f"✅ Index '{_ci_name_val}' created!")
                     time.sleep(1)
                     st.rerun()
                 else:
-                    st.error(f"Failed to create index: {result.get('error', 'Unknown error')}")
+                    st.error(f"Failed: {_result.get('error', 'Unknown error')}")
+
+    # ─────────────────────────────────────────────────────────────
+    # RIGHT: Existing Indexes
+    # ─────────────────────────────────────────────────────────────
+    with col_indexes:
+        _idx_hdr, _idx_btn = st.columns([3, 1])
+        with _idx_hdr:
+            st.markdown("<div class='section-header'>📂 Your Indexes</div>", unsafe_allow_html=True)
+        with _idx_btn:
+            if st.button("🔄", help="Refresh list", key="refresh_indexes"):
+                st.rerun()
+
+        indexes_data = list_indexes()
+        if not indexes_data or not indexes_data.get("indexes"):
+            st.markdown(
+                "<div class='info-box'>No indexes yet. Create your first one on the left.</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            _mode_badge = {"hybrid": "🔀 Hybrid", "vector": "🧠 Semantic", "fts": "🔍 Keyword"}
+            for idx in indexes_data["indexes"]:
+                _badge = _mode_badge.get(idx["retrieval_mode"], idx["retrieval_mode"])
+                st.markdown(
+                    f"""<div class='index-card'>
+  <div style='display:flex;justify-content:space-between;align-items:flex-start'>
+    <div><b>📊 {idx['index_name']}</b></div>
+    <div style='font-size:0.78rem;color:#64748b'>{_badge}</div>
+  </div>
+  <div style='font-size:0.82rem;color:#475569;margin-top:4px'>
+    {idx['chunk_count']:,} chunks &nbsp;·&nbsp; {idx['document_count']} docs
+  </div>
+  <div style='font-size:0.78rem;color:#94a3b8;margin-top:2px'>{idx.get('description') or '—'}</div>
+</div>""",
+                    unsafe_allow_html=True,
+                )
+                if st.button(f"🗑️ Delete {idx['index_name']}", key=f"del_{idx['index_name']}", use_container_width=True):
+                    _del_ok, _del_res = delete_index(idx["index_name"])
+                    if _del_ok:
+                        st.success(f"Deleted {idx['index_name']}")
+                        time.sleep(0.8)
+                        st.rerun()
+                    else:
+                        st.error(_del_res.get("error", "Unknown error"))
 
 
 # ========== TAB 2: Document Addition ==========
@@ -520,7 +810,7 @@ with tab2:
                 else:
                     st.success("✅ Ready")
         
-        # Live progress
+        # Live progress — auto-refresh every 2 seconds while ingestion is running
         if ingestion_status and ingestion_status['is_running']:
             st.markdown("---")
             st.markdown("### ⏳ Ingestion in Progress")
@@ -540,6 +830,10 @@ with tab2:
             m2.metric("✅ Processed", processed)
             m3.metric("⏭️ Skipped", skipped)
             m4.metric("❌ Failed", failed)
+            
+            # Auto-refresh every 2 seconds
+            time.sleep(2)
+            st.rerun()
 
 
 # ========== TAB 3: Query & Questions ==========
@@ -670,9 +964,8 @@ with tab3:
                 if result:
                     st.markdown("### Answer")
                     answer_text = render_latex_text(result['answer'])
-                    st.markdown(f"<div class='success-box'>{answer_text}</div>", unsafe_allow_html=True)
-                    
-                    st.markdown(f"*Processing time: {result['processing_time']:.2f}s*")
+                    st.markdown(answer_text)
+                    st.caption(f"Processing time: {result['processing_time']:.2f}s")
                     
                     st.markdown("---")
                     st.markdown("### Retrieved Sources")
@@ -700,7 +993,8 @@ with tab3:
                                 st.caption(f"📊 Difficulty: **{difficulty}**")
                             
                             st.markdown("---")
-                            st.text(chunk['content'])
+                            chunk_text = render_latex_text(chunk['content'])
+                            st.markdown(chunk_text)
     
     # Sub-tab 2: Generate Questions
     with subtab2:
@@ -746,19 +1040,21 @@ with tab3:
                     
                     st.markdown("---")
                     for i, q in enumerate(result['questions'], 1):
-                        st.markdown(f"### Question {i}")
-                        
-                        question_text = render_latex_text(q['question'])
-                        st.markdown(question_text)
-                        
-                        if q.get('options'):
-                            for opt in q['options']:
-                                st.markdown(f"- {opt}")
-                        
-                        with st.expander("Show Answer"):
-                            st.markdown(f"**Answer:** {q['correct_answer']}")
-                            if q.get('explanation'):
-                                st.markdown(f"**Explanation:** {q['explanation']}")
+                        with st.container(border=True):
+                            st.markdown(f"**Question {i}**")
+                            question_text = render_latex_text(q['question'])
+                            st.markdown(question_text)
+
+                            if q.get('options'):
+                                for opt in q['options']:
+                                    st.markdown(render_latex_text(f"- {opt}"))
+
+                            with st.expander("Show Answer"):
+                                ans_text = render_latex_text(str(q['correct_answer']))
+                                st.markdown(f"**Answer:** {ans_text}")
+                                if q.get('explanation'):
+                                    exp_text = render_latex_text(q['explanation'])
+                                    st.markdown(f"**Explanation:** {exp_text}")
 
 # Footer
 st.markdown("---")

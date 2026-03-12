@@ -2,6 +2,7 @@
 Streamlit UI for the RAG Question Generator.
 Two tabs: Knowledge Addition and Query/Question Generation.
 """
+import os
 import streamlit as st
 import requests
 import time
@@ -11,8 +12,8 @@ import pandas as pd
 from typing import Optional
 
 
-# Configuration
-API_BASE_URL = "http://localhost:8601"
+# Configuration - use BACKEND_URL env var (set in Docker), fallback to localhost for local dev
+API_BASE_URL = os.environ.get("BACKEND_URL", "http://localhost:8601")
 
 
 def render_latex_text(text: str) -> str:
@@ -43,6 +44,10 @@ def render_latex_text(text: str) -> str:
         # Skip lines already in math mode
         if '$' in line or '$$' in line:
             result_lines.append(line)
+        # Check for arrow commands (always wrap, common in chemical equations)
+        elif any(cmd in line for cmd in [r'\rightarrow', r'\leftarrow', r'\Rightarrow', r'\Leftarrow',
+                                         r'\to', r'\gets', r'\longrightarrow', r'\longleftarrow']):
+            result_lines.append(f"${line}$")
         # Wrap lines with bare LaTeX commands in $...$
         elif any(cmd in line for cmd in [r'\frac', r'\sqrt', r'\int', r'\sum', r'\prod',
                                          r'\sin', r'\cos', r'\tan', r'\log', r'\exp',

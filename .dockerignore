@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+**/venv/
+env/
+**/env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+!README.md
+docs/
+Documentation/
+
+# Data (will be mounted as volumes)
+data/
+**/data/
+models/
+**/models/
+*.db
+**/*.db
+*.pkl
+**/*.pkl
+*.index
+**/*.index
+*.faiss
+**/*.faiss
+
+# Logs
+*.log
+logs/
+backend.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Scripts
+*.sh
+*.bat
+*.ps1
+start*.py
+stop*.py
+restart*.py
+check*.py
+clear*.py
+
+# Claude
+.claude/
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+.dockerignore
