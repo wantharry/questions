@@ -187,27 +187,47 @@ class QuestionGenerator:
                     except json.JSONDecodeError as e2:
                         parse_errors.append(f"Lenient parse: {e2}")
 
-                        # Strategy 3: Use simpler, more direct backslash escaping
+                        # Strategy 3: Process character by character to escape backslashes properly
                         try:
-                            # Simply replace any \ that's not followed by valid JSON escape chars
-                            # with \\, being careful about already-escaped backslashes
-                            json_str_cleaned = json_str
-                            # This regex: \\  not followed by another \ or valid JSON escape chars
-                            # becomes \\\\
-                            json_str_cleaned = re.sub(r'(?<!\\)\\(?!["\\/bfnrtu])', r'\\\\', json_str_cleaned)
+                            # Build a properly escaped string
+                            result = []
+                            i = 0
+                            while i < len(json_str):
+                                if json_str[i] == '\\':
+                                    # Look ahead to see what follows the backslash
+                                    if i + 1 < len(json_str):
+                                        next_char = json_str[i + 1]
+                                        # Valid JSON escape sequences
+                                        if next_char in '"\\/bfnrtu':
+                                            result.append(json_str[i:i+2])
+                                            i += 2
+                                        else:
+                                            # Invalid escape - double the backslash
+                                            result.append('\\\\')
+                                            result.append(next_char)
+                                            i += 2
+                                    else:
+                                        result.append('\\\\')
+                                        i += 1
+                                else:
+                                    result.append(json_str[i])
+                                    i += 1
+                            json_str_cleaned = ''.join(result)
                             parsed = json.loads(json_str_cleaned)
-                        except (json.JSONDecodeError, re.error) as e3:
-                            parse_errors.append(f"Simple backslash fix: {e3}")
+                        except (json.JSONDecodeError, re.error, ValueError) as e3:
+                            parse_errors.append(f"Character-by-character escape: {e3}")
 
-                            # Strategy 4: More aggressive - escape all single backslashes
+                            # Strategy 4: Fallback - try to extract valid JSON objects manually
                             try:
-                                # Replace single backslashes with double backslashes
-                                json_str_fixed = json_str.replace('\\', '\\\\')
-                                # Undo the ones that were already escaped (now they're \\\\)
-                                # Only keep the ones that really need escaping
+                                # Find all {...} patterns and try to parse them individually
+                                import ast
+                                # Try a very lenient approach - just get the structure
+                                json_str_fixed = json_str.replace("'", '"')  # Single to double quotes
+                                # Remove control characters
+                                json_str_fixed = ''.join(c for c in json_str_fixed if ord(c) >= 32 or c in '\n\t\r')
                                 parsed = json.loads(json_str_fixed)
-                            except (json.JSONDecodeError, re.error) as e4:
-                                parse_errors.append(f"Aggressive escape: {e4}")
+                            except (json.JSONDecodeError, re.error, ValueError) as e4:
+                                parse_errors.append(f"Manual structure parse: {e4}")
                 
                 if parsed and isinstance(parsed, list):
                     for item in parsed:
