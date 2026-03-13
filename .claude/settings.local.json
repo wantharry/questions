@@ -14,7 +14,16 @@
       "Bash(bash:*)",
       "Bash(dos2unix:*)",
       "Bash(./stop_all.sh:*)",
-      "Bash(./restart_all.sh:*)"
+      "Bash(./restart_all.sh:*)",
+      "Bash(__NEW_LINE_b89acf1d7feb291c__ echo \"Response saved, checking...\")",
+      "Read(//tmp/**)",
+      "Bash(netstat:*)",
+      "Bash(rm:*)",
+      "Bash(pgrep:*)",
+      "Bash(xargs kill)",
+      "Bash(xargs -r kill)",
+      "Bash(./start_all.sh)",
+      "Bash(timeout 400 curl:*)"
     ]
   }
 }

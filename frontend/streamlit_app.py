@@ -625,7 +625,7 @@ with tab2:
             )
         
         with col2:
-            num_questions = st.slider("Number of Questions", 1, 10, 5)
+            num_questions = st.slider("Number of Questions", 1, 100, 5)
             
             topic = st.text_input(
                 "Specific Topic (optional)",

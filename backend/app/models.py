@@ -131,7 +131,7 @@ class QuestionGenerationRequest(BaseModel):
     subject: Subject = Field(..., description="Subject area for questions")
     difficulty: DifficultyLevel = Field(default=DifficultyLevel.MEDIUM)
     question_type: QuestionType = Field(default=QuestionType.MULTIPLE_CHOICE)
-    num_questions: int = Field(default=5, ge=1, le=20, description="Number of questions to generate")
+    num_questions: int = Field(default=5, ge=1, le=100, description="Number of questions to generate")
     topic: Optional[str] = Field(default=None, description="Specific topic within subject")
     index_filter: Optional[List[str]] = Field(default=None, description="Filter by specific indexes (None = search all)")
     model: Optional[str] = Field(default=None, description="LLM model to use (None = use default from config)")

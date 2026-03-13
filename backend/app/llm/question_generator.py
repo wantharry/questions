@@ -39,6 +39,43 @@ class QuestionGenerator:
         Returns:
             List of GeneratedQuestion objects
         """
+        # Handle large batches by chunking into smaller requests
+        CHUNK_SIZE = 10  # Generate 10 questions at a time (proven stable)
+        if request.num_questions > CHUNK_SIZE:
+            app_logger.info(
+                f"Large batch detected ({request.num_questions} questions). "
+                f"Splitting into {CHUNK_SIZE}-question chunks..."
+            )
+            all_questions = []
+            remaining = request.num_questions
+            chunk_num = 1
+
+            while remaining > 0:
+                # Calculate chunk size (last chunk may be smaller)
+                current_chunk_size = min(CHUNK_SIZE, remaining)
+
+                # Create request for this chunk
+                chunk_request = QuestionGenerationRequest(
+                    context=request.context,
+                    subject=request.subject,
+                    difficulty=request.difficulty,
+                    question_type=request.question_type,
+                    num_questions=current_chunk_size,
+                    topic=request.topic,
+                    index_filter=request.index_filter,
+                    model=request.model,
+                )
+
+                app_logger.info(f"Generating chunk {chunk_num} ({current_chunk_size} questions)...")
+                chunk_questions = await self.generate_questions(chunk_request, llm)
+                all_questions.extend(chunk_questions)
+
+                remaining -= current_chunk_size
+                chunk_num += 1
+
+            app_logger.info(f"Generated all {len(all_questions)} questions from {chunk_num - 1} chunks")
+            return all_questions
+
         try:
             # Get context
             if request.context:
@@ -126,7 +163,7 @@ class QuestionGenerator:
             # Try to parse as JSON
             # Look for JSON array in the response
             response_text = response_text.strip()
-            
+
             # Try to find JSON array
             start_idx = response_text.find('[')
             end_idx = response_text.rfind(']')
@@ -137,26 +174,40 @@ class QuestionGenerator:
                 # Try multiple parsing strategies
                 parsed = None
                 parse_errors = []
-                
+
                 # Strategy 1: Direct parsing
                 try:
                     parsed = json.loads(json_str)
                 except json.JSONDecodeError as e:
                     parse_errors.append(f"Direct parse: {e}")
-                    
+
                     # Strategy 2: Try with strict=False to allow control characters
                     try:
                         parsed = json.loads(json_str, strict=False)
                     except json.JSONDecodeError as e2:
                         parse_errors.append(f"Lenient parse: {e2}")
-                        
-                        # Strategy 3: Escape backslashes (common with LaTeX)
+
+                        # Strategy 3: Use simpler, more direct backslash escaping
                         try:
-                            # This regex replaces \ with \\ only if not already followed by another \
-                            json_str_escaped = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_str)
-                            parsed = json.loads(json_str_escaped)
+                            # Simply replace any \ that's not followed by valid JSON escape chars
+                            # with \\, being careful about already-escaped backslashes
+                            json_str_cleaned = json_str
+                            # This regex: \\  not followed by another \ or valid JSON escape chars
+                            # becomes \\\\
+                            json_str_cleaned = re.sub(r'(?<!\\)\\(?!["\\/bfnrtu])', r'\\\\', json_str_cleaned)
+                            parsed = json.loads(json_str_cleaned)
                         except (json.JSONDecodeError, re.error) as e3:
-                            parse_errors.append(f"Escaped parse: {e3}")
+                            parse_errors.append(f"Simple backslash fix: {e3}")
+
+                            # Strategy 4: More aggressive - escape all single backslashes
+                            try:
+                                # Replace single backslashes with double backslashes
+                                json_str_fixed = json_str.replace('\\', '\\\\')
+                                # Undo the ones that were already escaped (now they're \\\\)
+                                # Only keep the ones that really need escaping
+                                parsed = json.loads(json_str_fixed)
+                            except (json.JSONDecodeError, re.error) as e4:
+                                parse_errors.append(f"Aggressive escape: {e4}")
                 
                 if parsed and isinstance(parsed, list):
                     for item in parsed:
@@ -249,4 +300,4 @@ class QuestionGenerator:
                 )
             )
         
-        return questions[:10]  # Limit fallback results
+        return questions  # Return all parsed questions (no artificial limit)

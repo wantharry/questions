@@ -221,18 +221,24 @@ If the context is insufficient, state this clearly and provide the best answer y
             user_prompt += f"\n\nNote: Generate {question_type.value.replace('_', ' ')} questions."
 
         # Enforce exact JSON field names so the parser can reliably extract explanation
-        user_prompt += """
+        user_prompt += f"""
 
-Use EXACTLY this JSON structure (no other field names):
+IMPORTANT: Return EXACTLY {num_questions} questions in this JSON structure:
 [
-  {
+  {{
     "question": "question text here",
     "options": ["A) option1", "B) option2", "C) option3", "D) option4"],
     "correct_answer": "full correct answer here",
     "explanation": "detailed explanation here"
-  }
+  }}
+  {", " if num_questions > 1 else ""}...
 ]
-For non-multiple-choice questions, set "options" to null. Return ONLY the JSON array, no other text."""
+Rules:
+1. Return ONLY the JSON array, no other text before or after
+2. Generate exactly {num_questions} questions
+3. For non-multiple-choice questions, set "options" to null
+4. Do NOT wrap the array in markdown code blocks (no backticks)
+5. Each question must have all 4 fields: question, options, correct_answer, explanation"""
 
         return system_prompt, user_prompt
     
