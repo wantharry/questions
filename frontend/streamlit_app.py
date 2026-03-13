@@ -208,7 +208,7 @@ def generate_questions(
         response = requests.post(
             f"{API_BASE_URL}/api/generate-questions",
             json=payload,
-            timeout=120
+            timeout=360  # 6 minutes for large batches (45+ questions takes 3-5 min)
         )
         if response.status_code == 200:
             return response.json()
