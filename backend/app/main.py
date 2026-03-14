@@ -4,9 +4,12 @@ FastAPI main application with all endpoints.
 import time
 from datetime import datetime
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import os
+from pathlib import Path
+import shutil
 
 from app.config import settings
 from app.models import (
@@ -21,6 +24,15 @@ from app.models import (
     IndexInfo,
     ListIndexesResponse,
     IndexOperationResponse,
+    CreateSessionRequest,
+    CreateSessionResponse,
+    SessionValidateRequest,
+    SessionValidateResponse,
+    UserSubjectRequest,
+    UserSubjectResponse,
+    DocumentUploadResponse,
+    DocumentListResponse,
+    DocumentIngestResponse,
 )
 from app.models_advanced import HybridSearchRequest
 from app.ingestion.advanced_ingestion_manager import AdvancedIngestionManager
@@ -29,6 +41,8 @@ from app.ingestion.embedder import SentenceTransformerEmbedder
 from app.llm.question_generator import QuestionGenerator
 from app.llm.llm_manager import LLMManager
 from app.llm.prompts import PromptTemplates
+from app.sessions import SessionManager
+from app.vectorstore.metadata_db import init_database
 from app.utils.logger import app_logger, setup_logging
 
 
@@ -47,8 +61,13 @@ async def lifespan(app: FastAPI):
     # Startup
     setup_logging()
     app_logger.info("Starting application with Advanced Hybrid RAG...")
-    
+
     try:
+        # Initialize database for multi-user support
+        app_logger.info("Initializing database...")
+        init_database()
+        app_logger.info("Database ready")
+
         # Only initialize ingestion manager on startup (needed for ingestion)
         # This loads the embedding model which is required for document vectorization
         app_logger.info("Initializing ingestion manager...")
@@ -533,12 +552,12 @@ async def get_index_info(index_name: str):
     """Get detailed information about a specific index."""
     try:
         all_indexes = ingestion_manager.multi_index.list_all_indexes()
-        
+
         if index_name not in all_indexes:
             raise HTTPException(status_code=404, detail=f"Index '{index_name}' not found")
-        
+
         stats = all_indexes[index_name]
-        
+
         return IndexInfo(
             name=index_name,
             description="",
@@ -547,12 +566,387 @@ async def get_index_info(index_name: str):
             dimension=stats['dimension'],
             is_custom=stats['is_custom']
         )
-    
+
     except HTTPException:
         raise
     except Exception as e:
         app_logger.error(f"Error getting index info: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get index info: {str(e)}")
+
+
+# Session Management endpoints
+@app.post("/api/session/create", response_model=CreateSessionResponse)
+async def create_session(request: CreateSessionRequest):
+    """
+    Create a new user session.
+
+    Returns a session token valid for 24 hours.
+    No authentication required.
+    """
+    try:
+        user_id, session_token = SessionManager.create_user(request.username)
+
+        return CreateSessionResponse(
+            user_id=user_id,
+            session_token=session_token,
+            expires_in_hours=SessionManager.SESSION_EXPIRY_HOURS,
+            message=f"Session created for {request.username}",
+        )
+    except Exception as e:
+        app_logger.error(f"Error creating session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
+
+
+@app.post("/api/session/validate", response_model=SessionValidateResponse)
+async def validate_session(request: SessionValidateRequest):
+    """
+    Validate a session token.
+
+    Returns user info if valid, empty response otherwise.
+    """
+    user_info = SessionManager.get_user_by_session(request.session_token)
+
+    if user_info:
+        return SessionValidateResponse(
+            valid=True,
+            user_id=user_info['user_id'],
+            username=user_info['username'],
+            session_expires_at=user_info['session_expires_at'],
+        )
+    else:
+        return SessionValidateResponse(valid=False)
+
+
+@app.post("/api/session/refresh")
+async def refresh_session(request: SessionValidateRequest):
+    """
+    Extend session expiry by 24 hours.
+    """
+    success = SessionManager.refresh_session(request.session_token)
+
+    if success:
+        return {
+            "success": True,
+            "message": "Session refreshed",
+        }
+    else:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+
+@app.post("/api/session/logout")
+async def logout_session(request: SessionValidateRequest):
+    """
+    Invalidate/logout a session.
+    """
+    success = SessionManager.invalidate_session(request.session_token)
+
+    if success:
+        return {
+            "success": True,
+            "message": "Session invalidated",
+        }
+    else:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+
+@app.post("/api/subjects", response_model=UserSubjectResponse)
+async def create_user_subject(
+    request: UserSubjectRequest,
+    session_token: str = None
+):
+    """
+    Create a custom subject/topic for a user.
+
+    Requires valid session token.
+    """
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Session token required")
+
+    user_id = SessionManager.get_user_id_from_token(session_token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+    try:
+        from app.vectorstore.metadata_db import UserSubject, get_session as get_db_session
+
+        db_session = get_db_session()
+        try:
+            subject = UserSubject(
+                user_id=user_id,
+                name=request.name,
+                description=request.description,
+            )
+            db_session.add(subject)
+            db_session.commit()
+
+            return UserSubjectResponse(
+                id=subject.id,
+                name=subject.name,
+                description=subject.description,
+                created_at=subject.created_at.isoformat(),
+            )
+        finally:
+            db_session.close()
+
+    except Exception as e:
+        app_logger.error(f"Error creating subject: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create subject: {str(e)}")
+
+
+@app.get("/api/subjects")
+async def list_user_subjects(session_token: str = None):
+    """
+    List all custom subjects for a user.
+
+    Requires valid session token.
+    """
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Session token required")
+
+    user_id = SessionManager.get_user_id_from_token(session_token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+    try:
+        from app.vectorstore.metadata_db import UserSubject, get_session as get_db_session
+
+        db_session = get_db_session()
+        try:
+            subjects = db_session.query(UserSubject).filter(
+                UserSubject.user_id == user_id
+            ).all()
+
+            return {
+                "subjects": [
+                    {
+                        "id": s.id,
+                        "name": s.name,
+                        "description": s.description,
+                        "created_at": s.created_at.isoformat(),
+                    }
+                    for s in subjects
+                ],
+                "count": len(subjects),
+            }
+        finally:
+            db_session.close()
+
+    except Exception as e:
+        app_logger.error(f"Error listing subjects: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list subjects: {str(e)}")
+
+
+# Document Upload Endpoints
+def get_user_uploads_dir(user_id: int) -> Path:
+    """Get or create user's uploads directory."""
+    uploads_dir = Path(settings.data_dir) / "users" / str(user_id) / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    return uploads_dir
+
+
+def get_user_index_name(user_uuid: str) -> str:
+    """Generate user's custom index name from UUID."""
+    return f"user_{user_uuid[:8]}"
+
+
+def ensure_user_index(db_session, user_db_id: int, user_uuid: str):
+    """Create user's custom index if it doesn't exist."""
+    try:
+        index_name = get_user_index_name(user_uuid)
+        # Check if index already exists
+        existing_indexes = ingestion_manager.multi_index.list_all_indexes()
+        if index_name not in existing_indexes:
+            ingestion_manager.multi_index.create_custom_index(
+                index_name=index_name,
+                description=f"User documents for {user_uuid}",
+                embedding_dimension=settings.embedding_dimension
+            )
+            app_logger.info(f"Created custom index: {index_name}")
+    except Exception as e:
+        app_logger.error(f"Error ensuring user index: {e}")
+        raise
+
+
+@app.post("/api/documents/upload", response_model=DocumentUploadResponse)
+async def upload_documents(
+    files: list[UploadFile] = File(...),
+    x_session_token: str = Header(None),
+):
+    """
+    Upload documents for a user.
+
+    Accepts multipart/form-data with file(s).
+    Requires valid session token in X-Session-Token header.
+    """
+    if not x_session_token:
+        raise HTTPException(status_code=401, detail="Session token required")
+
+    # Validate session
+    user_info = SessionManager.get_user_by_session(x_session_token)
+    if not user_info:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+    user_db_id = SessionManager.get_user_id_from_token(x_session_token)
+    user_uuid = user_info['user_id']
+
+    try:
+        from app.vectorstore.metadata_db import User, get_session as get_db_session
+
+        # Ensure user's custom index exists
+        ensure_user_index(None, user_db_id, user_uuid)
+
+        # Get user's uploads directory
+        uploads_dir = get_user_uploads_dir(user_db_id)
+
+        uploaded_files = []
+        for file in files:
+            if not file.filename:
+                continue
+
+            # Security: validate file extension
+            allowed_extensions = {'.pdf', '.txt', '.md', '.html', '.htm', '.docx', '.doc'}
+            file_ext = Path(file.filename).suffix.lower()
+            if file_ext not in allowed_extensions:
+                app_logger.warning(f"Rejected file with extension {file_ext}: {file.filename}")
+                continue
+
+            # Save file
+            file_path = uploads_dir / file.filename
+
+            # If file exists, create a new name
+            counter = 1
+            base_name = file_path.stem
+            while file_path.exists():
+                file_path = uploads_dir / f"{base_name}_{counter}{file_ext}"
+                counter += 1
+
+            with open(file_path, 'wb') as f:
+                contents = await file.read()
+                f.write(contents)
+
+            uploaded_files.append({
+                "filename": file_path.name,
+                "path": str(file_path),
+                "size": file_path.stat().st_size,
+            })
+
+            app_logger.info(f"Uploaded file: {file_path}")
+
+        return DocumentUploadResponse(
+            success=True,
+            message=f"Uploaded {len(uploaded_files)} file(s)",
+            files=uploaded_files,
+            upload_dir=str(uploads_dir),
+        )
+
+    except Exception as e:
+        app_logger.error(f"Error uploading documents: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.get("/api/documents", response_model=DocumentListResponse)
+async def list_documents(x_session_token: str = Header(None)):
+    """
+    List user's uploaded documents.
+
+    Requires valid session token in X-Session-Token header.
+    """
+    if not x_session_token:
+        raise HTTPException(status_code=401, detail="Session token required")
+
+    # Validate session
+    user_info = SessionManager.get_user_by_session(x_session_token)
+    if not user_info:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+    user_db_id = SessionManager.get_user_id_from_token(x_session_token)
+
+    try:
+        uploads_dir = get_user_uploads_dir(user_db_id)
+
+        files = []
+        if uploads_dir.exists():
+            for file_path in sorted(uploads_dir.glob('*')):
+                if file_path.is_file():
+                    stat = file_path.stat()
+                    files.append({
+                        "filename": file_path.name,
+                        "path": str(file_path),
+                        "size": stat.st_size,
+                        "uploaded_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    })
+
+        return DocumentListResponse(
+            files=files,
+            count=len(files),
+        )
+
+    except Exception as e:
+        app_logger.error(f"Error listing documents: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+
+@app.post("/api/documents/ingest", response_model=DocumentIngestResponse)
+async def ingest_user_documents(
+    background_tasks: BackgroundTasks,
+    x_session_token: str = Header(None),
+):
+    """
+    Trigger ingestion of user's uploaded documents.
+
+    Runs in background. Documents are ingested into user's private index.
+    Requires valid session token in X-Session-Token header.
+    """
+    if not x_session_token:
+        raise HTTPException(status_code=401, detail="Session token required")
+
+    # Validate session
+    user_info = SessionManager.get_user_by_session(x_session_token)
+    if not user_info:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+    user_db_id = SessionManager.get_user_id_from_token(x_session_token)
+    user_uuid = user_info['user_id']
+
+    try:
+        if ingestion_manager.is_running:
+            raise HTTPException(status_code=400, detail="Ingestion already running")
+
+        # Ensure user's custom index exists
+        ensure_user_index(None, user_db_id, user_uuid)
+
+        # Get user's uploads directory
+        uploads_dir = get_user_uploads_dir(user_db_id)
+
+        if not uploads_dir.exists() or not any(uploads_dir.iterdir()):
+            raise HTTPException(status_code=400, detail="No files to ingest")
+
+        # Create ingestion request for user's documents
+        user_index_name = get_user_index_name(user_uuid)
+
+        request = IngestionRequest(
+            folder_path=str(uploads_dir),
+            recursive=False,  # Don't recursively scan the uploads directory
+            target_index=user_index_name,
+        )
+
+        app_logger.info(f"Starting user ingestion for {user_uuid} into index {user_index_name}")
+
+        # Run ingestion in background
+        background_tasks.add_task(ingestion_manager.ingest_documents, request)
+
+        return DocumentIngestResponse(
+            success=True,
+            message="Ingestion started",
+            upload_dir=str(uploads_dir),
+            target_index=user_index_name,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        app_logger.error(f"Error starting user ingestion: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start ingestion: {str(e)}")
 
 
 # Error handlers

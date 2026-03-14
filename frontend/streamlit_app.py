@@ -119,7 +119,13 @@ def start_ingestion(folder_path: str, recursive: bool, file_patterns: list, forc
             payload["target_index"] = target_index
         if model:
             payload["model"] = model
-        response = requests.post(f"{API_BASE_URL}/api/ingest", json=payload)
+
+        # Add session token if available
+        headers = {}
+        if st.session_state.session_token:
+            headers["X-Session-Token"] = st.session_state.session_token
+
+        response = requests.post(f"{API_BASE_URL}/api/ingest", json=payload, headers=headers)
         return response.status_code == 200, response.json()
     except Exception as e:
         return False, {"error": str(e)}
@@ -171,8 +177,13 @@ def query_knowledge_base(query: str, top_k: int = 5, model: Optional[str] = None
             payload["model"] = model
         if index_filter:
             payload["index_filter"] = index_filter
-        
-        response = requests.post(f"{API_BASE_URL}/api/query", json=payload, timeout=60)
+
+        # Add session token if available
+        headers = {}
+        if st.session_state.session_token:
+            headers["X-Session-Token"] = st.session_state.session_token
+
+        response = requests.post(f"{API_BASE_URL}/api/query", json=payload, headers=headers, timeout=60)
         if response.status_code == 200:
             return response.json()
         return None
@@ -204,10 +215,16 @@ def generate_questions(
             payload["model"] = model
         if index_filter:
             payload["index_filter"] = index_filter
-        
+
+        # Add session token if available
+        headers = {}
+        if st.session_state.session_token:
+            headers["X-Session-Token"] = st.session_state.session_token
+
         response = requests.post(
             f"{API_BASE_URL}/api/generate-questions",
             json=payload,
+            headers=headers,
             timeout=360  # 6 minutes for large batches (45+ questions takes 3-5 min)
         )
         if response.status_code == 200:
@@ -216,6 +233,78 @@ def generate_questions(
     except Exception as e:
         st.error(f"Question generation error: {e}")
         return None
+
+
+def upload_user_documents(uploaded_files):
+    """Upload files for a user."""
+    try:
+        headers = {}
+        if st.session_state.session_token:
+            headers["X-Session-Token"] = st.session_state.session_token
+
+        files = [("files", (f.name, f.getbuffer(), "application/octet-stream")) for f in uploaded_files]
+
+        response = requests.post(
+            f"{API_BASE_URL}/api/documents/upload",
+            files=files,
+            headers=headers,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            return True, response.json()
+        else:
+            return False, response.json()
+    except Exception as e:
+        return False, {"error": str(e)}
+
+
+def get_user_documents():
+    """Get list of user's uploaded documents."""
+    try:
+        headers = {}
+        if st.session_state.session_token:
+            headers["X-Session-Token"] = st.session_state.session_token
+
+        response = requests.get(
+            f"{API_BASE_URL}/api/documents",
+            headers=headers,
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
+        return None
+
+
+def ingest_user_documents():
+    """Trigger ingestion of user's uploaded documents."""
+    try:
+        headers = {}
+        if st.session_state.session_token:
+            headers["X-Session-Token"] = st.session_state.session_token
+
+        response = requests.post(
+            f"{API_BASE_URL}/api/documents/ingest",
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            return True, response.json()
+        else:
+            return False, response.json()
+    except Exception as e:
+        return False, {"error": str(e)}
+
+
+def get_user_index_name() -> Optional[str]:
+    """Get the user's personal index name."""
+    if st.session_state.user_id:
+        return f"user_{st.session_state.user_id[:8]}"
+    return None
 
 
 # Page configuration
@@ -251,12 +340,105 @@ st.markdown("""
         border: 1px solid #bee5eb;
         color: #0c5460;
     }
+    .session-box {
+        padding: 0.75rem;
+        border-radius: 0.5rem;
+        background-color: #e7f3ff;
+        border: 1px solid #b3d9ff;
+        color: #004085;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Title and header
+# Session Management
+def init_session_state():
+    """Initialize session state variables."""
+    if 'session_token' not in st.session_state:
+        st.session_state.session_token = None
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = None
+    if 'username' not in st.session_state:
+        st.session_state.username = None
+
+init_session_state()
+
+# Login/Logout UI
+with st.container():
+    col1, col2, col3 = st.columns([2, 2, 1])
+
+    if st.session_state.session_token:
+        # User is logged in
+        with col1:
+            st.markdown(f"""
+            <div class="session-box">
+            👤 <b>Logged in as:</b> {st.session_state.username}
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col3:
+            if st.button("🚪 Logout", key="logout_btn"):
+                try:
+                    requests.post(
+                        f"{API_BASE_URL}/api/session/logout",
+                        json={"session_token": st.session_state.session_token},
+                        timeout=5
+                    )
+                except:
+                    pass
+                st.session_state.session_token = None
+                st.session_state.user_id = None
+                st.session_state.username = None
+                st.rerun()
+    else:
+        # User is not logged in - show login form
+        st.markdown("### 🔐 Login to Continue")
+
+        login_col1, login_col2 = st.columns([2, 1])
+
+        with login_col1:
+            username = st.text_input(
+                "Username",
+                placeholder="Enter your name",
+                key="login_username"
+            )
+
+        with login_col2:
+            login_btn = st.button("Login", key="login_btn", use_container_width=True)
+
+        if login_btn:
+            if not username.strip():
+                st.error("Please enter a username")
+            else:
+                try:
+                    response = requests.post(
+                        f"{API_BASE_URL}/api/session/create",
+                        json={"username": username.strip()},
+                        timeout=5
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        st.session_state.session_token = data['session_token']
+                        st.session_state.user_id = data['user_id']
+                        st.session_state.username = username.strip()
+                        st.success(f"✅ Welcome, {username}!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Login failed: {response.json().get('detail', 'Unknown error')}")
+                except requests.exceptions.ConnectionError:
+                    st.error("❌ Cannot connect to API. Make sure the backend is running.")
+                except Exception as e:
+                    st.error(f"Login error: {str(e)}")
+
+# Title and header (shown after login check)
 st.title("📚 RAG Question Generator")
 st.markdown("Local knowledge base with AI-powered question generation")
+
+# If not logged in, show a message and stop
+if not st.session_state.session_token:
+    st.info("👆 Please login above to get started")
+    st.stop()
 
 # Sidebar - System Status
 with st.sidebar:
@@ -292,7 +474,7 @@ with st.sidebar:
         st.warning("Make sure the backend is running:\n```\npython -m app.main\n```")
 
 # Main tabs
-tab1, tab2, tab3 = st.tabs(["📁 Knowledge Addition", "🔍 Query & Questions", "🏗️ Index Management"])
+tab1, tab2, tab3, tab4 = st.tabs(["📁 Knowledge Addition", "🔍 Query & Questions", "🏗️ Index Management", "📤 Upload Documents"])
 
 # ========== TAB 1: Knowledge Addition ==========
 with tab1:
@@ -499,11 +681,17 @@ with tab2:
         
         with col_opt2:
             if available_indexes:
+                # Auto-select user's index if available
+                user_index = get_user_index_name()
+                default_indexes = []
+                if user_index and user_index in available_indexes:
+                    default_indexes = [user_index]
+
                 selected_indexes = st.multiselect(
                     "📑 Search Indexes",
                     options=available_indexes,
-                    default=None,
-                    help="Leave empty to search all indexes"
+                    default=default_indexes,
+                    help="Leave empty to search all indexes. Your personal index is pre-selected."
                 )
                 query_indexes = selected_indexes if selected_indexes else None
             else:
@@ -593,11 +781,17 @@ with tab2:
             
             with col_adv2:
                 if available_indexes:
+                    # Auto-select user's index if available
+                    user_index = get_user_index_name()
+                    default_indexes = []
+                    if user_index and user_index in available_indexes:
+                        default_indexes = [user_index]
+
                     questions_indexes = st.multiselect(
                         "📑 Source Indexes",
                         options=available_indexes,
-                        default=None,
-                        help="Leave empty to use all indexes for context",
+                        default=default_indexes,
+                        help="Leave empty to use all indexes for context. Your personal index is pre-selected.",
                         key="questions_indexes"
                     )
                     questions_index_filter = questions_indexes if questions_indexes else None
@@ -851,6 +1045,111 @@ with tab3:
     - **general**: Mixed or unclassified content
     
     Documents are automatically routed to these indexes based on content classification.
+    """)
+
+# ========== TAB 4: Upload Documents ==========
+with tab4:
+    st.header("📤 Upload Your Documents")
+    st.markdown("Upload PDF, DOCX, TXT, HTML, or Markdown files to your personal knowledge base.")
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.markdown("### Upload Files")
+
+        uploaded_files = st.file_uploader(
+            "Choose files to upload",
+            type=["pdf", "docx", "txt", "md", "html", "htm"],
+            accept_multiple_files=True,
+            help="Select one or more files. Supported: PDF, DOCX, TXT, Markdown, HTML"
+        )
+
+        col_upload, col_ingest = st.columns(2)
+
+        with col_upload:
+            upload_btn = st.button("📤 Upload Files", use_container_width=True)
+
+        with col_ingest:
+            ingest_btn = st.button("🚀 Upload & Ingest", type="primary", use_container_width=True)
+
+        if upload_btn and uploaded_files:
+            with st.spinner(f"Uploading {len(uploaded_files)} file(s)..."):
+                success, result = upload_user_documents(uploaded_files)
+                if success:
+                    st.success(f"✅ {result.get('message', 'Files uploaded successfully!')}")
+                    st.json(result.get('files', []))
+                else:
+                    st.error(f"❌ Upload failed: {result.get('error', 'Unknown error')}")
+
+        if ingest_btn and uploaded_files:
+            with st.spinner(f"Uploading and ingesting {len(uploaded_files)} file(s)..."):
+                success, result = upload_user_documents(uploaded_files)
+                if success:
+                    st.success(f"✅ {result.get('message', 'Files uploaded!')}")
+
+                    # Now start ingestion
+                    with st.spinner("Starting ingestion..."):
+                        ingest_success, ingest_result = ingest_user_documents()
+                        if ingest_success:
+                            st.success(f"✅ Ingestion started! Files will be indexed into: **{ingest_result.get('target_index')}**")
+                            st.info(f"📁 Location: `{ingest_result.get('upload_dir')}`")
+                        else:
+                            st.error(f"❌ Ingestion failed: {ingest_result.get('error', 'Unknown error')}")
+                else:
+                    st.error(f"❌ Upload failed: {result.get('error', 'Unknown error')}")
+
+    with col2:
+        st.markdown("### Your Documents")
+
+        if st.button("🔄 Refresh List"):
+            st.rerun()
+
+        docs_result = get_user_documents()
+        if docs_result:
+            files = docs_result.get('files', [])
+            count = docs_result.get('count', 0)
+
+            st.metric("Total Files", count)
+
+            if files:
+                st.markdown("**Recent Uploads:**")
+                for file_info in sorted(files, key=lambda x: x.get('uploaded_at', ''), reverse=True)[:5]:
+                    file_size_kb = file_info['size'] / 1024
+                    st.caption(f"📄 **{file_info['filename']}** ({file_size_kb:.1f} KB)")
+                    st.caption(f"   Uploaded: {file_info.get('uploaded_at', 'N/A')}")
+            else:
+                st.info("No files uploaded yet.")
+        else:
+            st.warning("Unable to fetch document list")
+
+    # Instructions and user index info
+    st.markdown("---")
+
+    user_index = get_user_index_name()
+    if user_index:
+        st.info(f"🔒 **Your Personal Index:** `{user_index}` — Only you can see and search these documents")
+
+    st.markdown("""
+    ### 📚 How to Use
+
+    1. **Upload Files**: Select one or more documents from your computer
+    2. **Click "Upload & Ingest"**: Files are uploaded and automatically indexed
+    3. **Search & Generate**: Your documents appear in your personal index when querying or generating questions
+
+    ### ✨ Features
+
+    - 🔒 **Privacy**: Your documents are only searchable by you
+    - ⚡ **Instant Indexing**: Files are processed in the background
+    - 🔍 **Full Search**: Use Query or Generate Questions tabs to search your documents
+    - 📊 **Progress Tracking**: Monitor ingestion status in the Knowledge Addition tab
+
+    ### 📋 Supported Formats
+
+    - **PDF** (`.pdf`) — Including scanned PDFs with OCR
+    - **DOCX** (`.docx`) — Microsoft Word documents
+    - **Text** (`.txt`) — Plain text files
+    - **Markdown** (`.md`) — Markdown documents
+    - **HTML** (`.html`, `.htm`) — Web pages and HTML content
     """)
 
 # Footer

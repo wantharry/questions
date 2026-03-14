@@ -256,3 +256,123 @@ class IndexOperationResponse(BaseModel):
     success: bool
     message: str
     index_info: Optional[IndexInfo] = None
+
+
+# Session Management Models
+
+
+class CreateSessionRequest(BaseModel):
+    """Request to create a new user session."""
+    username: str = Field(..., min_length=1, max_length=100, description="Display name for user")
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "username": "Alice"
+        }
+    })
+
+
+class CreateSessionResponse(BaseModel):
+    """Response with session token."""
+    user_id: str
+    session_token: str
+    expires_in_hours: int
+    message: str
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "user_id": "550e8400-e29b-41d4-a716-446655440000",
+            "session_token": "a0e8b4c1-1234-5678-abcd-ef9876543210",
+            "expires_in_hours": 24,
+            "message": "Session created successfully"
+        }
+    })
+
+
+class SessionValidateRequest(BaseModel):
+    """Request to validate a session."""
+    session_token: str = Field(..., description="Session token to validate")
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "session_token": "a0e8b4c1-1234-5678-abcd-ef9876543210"
+        }
+    })
+
+
+class SessionValidateResponse(BaseModel):
+    """Response for session validation."""
+    valid: bool
+    user_id: Optional[str] = None
+    username: Optional[str] = None
+    session_expires_at: Optional[str] = None
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "valid": True,
+            "user_id": "550e8400-e29b-41d4-a716-446655440000",
+            "username": "Alice",
+            "session_expires_at": "2026-03-14T20:29:00"
+        }
+    })
+
+
+class UserSubjectRequest(BaseModel):
+    """Request to create/update user subject."""
+    name: str = Field(..., min_length=1, max_length=200, description="Subject/topic name")
+    description: Optional[str] = Field(default=None, max_length=500, description="Optional description")
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "name": "Advanced Calculus",
+            "description": "Courses on limits, derivatives, and integrals"
+        }
+    })
+
+
+class UserSubjectResponse(BaseModel):
+    """Response with user subject info."""
+    id: int
+    name: str
+    description: Optional[str] = None
+    created_at: str
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "id": 1,
+            "name": "Advanced Calculus",
+            "description": "Courses on limits, derivatives, and integrals",
+            "created_at": "2026-03-13T20:29:00"
+        }
+    })
+
+
+# Document Upload Models
+
+class UploadedFileInfo(BaseModel):
+    """Information about an uploaded file."""
+    filename: str
+    path: str
+    size: int
+
+
+class DocumentUploadResponse(BaseModel):
+    """Response for document upload."""
+    success: bool
+    message: str
+    files: List[UploadedFileInfo]
+    upload_dir: str
+
+
+class DocumentListResponse(BaseModel):
+    """Response for listing user's documents."""
+    files: List[Dict[str, Any]]
+    count: int
+
+
+class DocumentIngestResponse(BaseModel):
+    """Response for starting document ingestion."""
+    success: bool
+    message: str
+    upload_dir: str
+    target_index: str

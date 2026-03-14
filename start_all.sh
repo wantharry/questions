@@ -26,7 +26,7 @@ sleep 2
 echo ""
 echo "[1/2] Starting Backend on port 8601..."
 cd backend
-uvicorn app.main:app --host 0.0.0.0 --port 8601 --reload > ../backend.log 2>&1 &
+uvicorn app.main:app --host 0.0.0.0 --port 8601 > ../backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
 echo "  Backend PID: $BACKEND_PID"

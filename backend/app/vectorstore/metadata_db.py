@@ -13,6 +13,7 @@ from sqlalchemy import (
     Boolean,
     ForeignKey,
     JSON,
+    func,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
@@ -82,25 +83,107 @@ class Chunk(Base):
 
 class IngestionLog(Base):
     """Ingestion process log."""
-    
+
     __tablename__ = "ingestion_logs"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String(64), nullable=False, index=True)
-    
+
     action = Column(String(50), nullable=False)  # start, process, complete, error
     message = Column(Text, nullable=True)
-    
+
     documents_total = Column(Integer, default=0)
     documents_processed = Column(Integer, default=0)
     documents_failed = Column(Integer, default=0)
-    
+
     timestamp = Column(DateTime, default=datetime.now, nullable=False)
-    
+
     log_metadata = Column(JSON, default=dict)
-    
+
     def __repr__(self):
         return f"<IngestionLog(id={self.id}, session={self.session_id}, action={self.action})>"
+
+
+class User(Base):
+    """User account for multi-user platform."""
+
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(64), unique=True, nullable=False, index=True)  # UUID
+    username = Column(String(100), nullable=False)
+
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    # Relationships
+    sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
+    subjects = relationship("UserSubject", back_populates="user", cascade="all, delete-orphan")
+    documents = relationship("UserDocument", back_populates="user", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<User(id={self.id}, user_id={self.user_id}, username={self.username})>"
+
+
+class UserSession(Base):
+    """User session management (no password auth)."""
+
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    session_token = Column(String(64), unique=True, nullable=False, index=True)  # UUID
+
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    expires_at = Column(DateTime, nullable=False)  # 24-hour expiry
+    last_activity = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    is_active = Column(Boolean, default=True)
+
+    # Relationship
+    user = relationship("User", back_populates="sessions")
+
+    def __repr__(self):
+        return f"<UserSession(id={self.id}, user_id={self.user_id}, active={self.is_active})>"
+
+
+class UserSubject(Base):
+    """Custom subject/topic created by user."""
+
+    __tablename__ = "user_subjects"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    name = Column(String(200), nullable=False)  # Custom topic name
+    description = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    # Relationship
+    user = relationship("User", back_populates="subjects")
+
+    def __repr__(self):
+        return f"<UserSubject(id={self.id}, user_id={self.user_id}, name={self.name})>"
+
+
+class UserDocument(Base):
+    """Document uploaded by user (links Document to User)."""
+
+    __tablename__ = "user_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
+
+    uploaded_at = Column(DateTime, default=datetime.now, nullable=False)
+
+    # Relationships
+    user = relationship("User", back_populates="documents")
+    document = relationship("Document")
+
+    def __repr__(self):
+        return f"<UserDocument(id={self.id}, user_id={self.user_id}, doc_id={self.document_id})>"
 
 
 # Database engine and session

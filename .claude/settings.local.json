@@ -23,7 +23,10 @@
       "Bash(xargs kill)",
       "Bash(xargs -r kill)",
       "Bash(./start_all.sh)",
-      "Bash(timeout 400 curl:*)"
+      "Bash(timeout 400 curl:*)",
+      "Bash(wc:*)",
+      "Bash(python:*)",
+      "Bash(git add:*)"
     ]
   }
 }
